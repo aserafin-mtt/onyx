@@ -43,6 +43,7 @@ from onyx.db.slack_bot import fetch_slack_bots
 from onyx.key_value_store.interface import KvKeyNotFoundError
 from onyx.natural_language_processing.search_nlp_models import EmbeddingModel
 from onyx.natural_language_processing.search_nlp_models import warm_up_bi_encoder
+from onyx.tracing.setup import setup_tracing
 from onyx.onyxbot.slack.config import get_slack_channel_config_for_bot_and_channel
 from onyx.onyxbot.slack.config import MAX_TENANTS_PER_POD
 from onyx.onyxbot.slack.config import TENANT_ACQUISITION_INTERVAL
@@ -1210,6 +1211,7 @@ if __name__ == "__main__":
     tenant_handler = SlackbotHandler()
 
     set_is_ee_based_on_env_variable()
+    setup_tracing()
 
     try:
         # Keep the main thread alive
