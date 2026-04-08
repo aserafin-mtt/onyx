@@ -5,6 +5,7 @@ from datetime import datetime
 from datetime import timedelta
 from datetime import timezone
 from typing import cast
+from uuid import UUID
 
 import jwt
 from email_validator import EmailNotValidError
@@ -18,6 +19,7 @@ from fastapi import Query
 from fastapi import Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from onyx.auth.anonymous_user import fetch_anonymous_user_info
@@ -25,17 +27,18 @@ from onyx.auth.email_utils import send_user_email_invite
 from onyx.auth.invited_users import get_invited_users
 from onyx.auth.invited_users import remove_user_from_invited_users
 from onyx.auth.invited_users import write_invited_users
+from onyx.auth.permissions import get_effective_permissions
+from onyx.auth.permissions import require_permission
 from onyx.auth.schemas import UserRole
 from onyx.auth.users import anonymous_user_enabled
-from onyx.auth.users import current_admin_user
 from onyx.auth.users import current_curator_or_admin_user
-from onyx.auth.users import current_user
 from onyx.auth.users import enforce_seat_limit
 from onyx.auth.users import optional_user
 from onyx.configs.app_configs import AUTH_BACKEND
 from onyx.configs.app_configs import AUTH_TYPE
 from onyx.configs.app_configs import AuthBackend
 from onyx.configs.app_configs import DEV_MODE
+from onyx.configs.app_configs import EMAIL_CONFIGURED
 from onyx.configs.app_configs import ENABLE_EMAIL_INVITES
 from onyx.configs.app_configs import NUM_FREE_TRIAL_USER_INVITES
 from onyx.configs.app_configs import REDIS_AUTH_KEY_PREFIX
@@ -47,6 +50,8 @@ from onyx.configs.constants import PUBLIC_API_TAGS
 from onyx.db.api_key import is_api_key_email_address
 from onyx.db.auth import get_live_users_count
 from onyx.db.engine.sql_engine import get_session
+from onyx.db.enums import AccountType
+from onyx.db.enums import Permission
 from onyx.db.enums import UserFileStatus
 from onyx.db.models import User
 from onyx.db.models import UserFile
@@ -54,6 +59,7 @@ from onyx.db.user_preferences import activate_user
 from onyx.db.user_preferences import deactivate_user
 from onyx.db.user_preferences import get_all_user_assistant_specific_configs
 from onyx.db.user_preferences import get_latest_access_token_for_user
+from onyx.db.user_preferences import get_memories_for_user
 from onyx.db.user_preferences import update_assistant_preferences
 from onyx.db.user_preferences import update_user_assistant_visibility
 from onyx.db.user_preferences import update_user_auto_scroll
@@ -66,11 +72,14 @@ from onyx.db.user_preferences import update_user_role
 from onyx.db.user_preferences import update_user_shortcut_enabled
 from onyx.db.user_preferences import update_user_temperature_override_enabled
 from onyx.db.user_preferences import update_user_theme_preference
+from onyx.db.users import batch_get_user_groups
 from onyx.db.users import delete_user_from_db
+from onyx.db.users import get_all_accepted_users
 from onyx.db.users import get_all_users
 from onyx.db.users import get_page_of_filtered_users
 from onyx.db.users import get_total_filtered_users_count
 from onyx.db.users import get_user_by_email
+from onyx.db.users import get_user_counts_by_role_and_status
 from onyx.db.users import validate_user_role_update
 from onyx.key_value_store.factory import get_kv_store
 from onyx.redis.redis_pool import get_raw_redis_client
@@ -78,8 +87,10 @@ from onyx.server.documents.models import PaginatedReturn
 from onyx.server.features.projects.models import UserFileSnapshot
 from onyx.server.manage.models import AllUsersResponse
 from onyx.server.manage.models import AutoScrollRequest
+from onyx.server.manage.models import BulkInviteResponse
 from onyx.server.manage.models import ChatBackgroundRequest
 from onyx.server.manage.models import DefaultAppModeRequest
+from onyx.server.manage.models import EmailInviteStatus
 from onyx.server.manage.models import MemoryItem
 from onyx.server.manage.models import PersonalizationUpdateRequest
 from onyx.server.manage.models import TenantInfo
@@ -95,6 +106,7 @@ from onyx.server.manage.models import UserSpecificAssistantPreferences
 from onyx.server.models import FullUserSnapshot
 from onyx.server.models import InvitedUserSnapshot
 from onyx.server.models import MinimalUserSnapshot
+from onyx.server.models import UserGroupInfo
 from onyx.server.usage_limits import is_tenant_on_trial_fn
 from onyx.server.utils import BasicAuthenticationError
 from onyx.utils.logger import setup_logger
@@ -114,7 +126,9 @@ USERS_PAGE_SIZE = 10
 @router.patch("/manage/set-user-role", tags=PUBLIC_API_TAGS)
 def set_user_role(
     user_role_update_request: UserRoleUpdateRequest,
-    current_user: User = Depends(current_admin_user),
+    current_user: User = Depends(
+        require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)
+    ),
     db_session: Session = Depends(get_session),
 ) -> None:
     user_to_update = get_user_by_email(
@@ -131,7 +145,7 @@ def set_user_role(
     # This will raise an exception if the role update is invalid
     validate_user_role_update(
         requested_role=requested_role,
-        current_role=current_role,
+        current_account_type=user_to_update.account_type,
         explicit_override=user_role_update_request.explicit_override,
     )
 
@@ -158,7 +172,7 @@ class TestUpsertRequest(BaseModel):
 @router.post("/manage/users/test-upsert-user")
 async def test_upsert_user(
     request: TestUpsertRequest,
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> None | FullUserSnapshot:
     """Test endpoint for upsert_saml_user. Only used for integration testing."""
     user = await fetch_ee_implementation_or_noop(
@@ -174,7 +188,7 @@ def list_accepted_users(
     page_size: int = Query(10, ge=1, le=1000),
     roles: list[UserRole] = Query(default=[]),
     is_active: bool | None = Query(default=None),
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> PaginatedReturn[FullUserSnapshot]:
     filtered_accepted_users = get_page_of_filtered_users(
@@ -200,17 +214,94 @@ def list_accepted_users(
             total_items=0,
         )
 
+    user_ids = [user.id for user in filtered_accepted_users]
+    groups_by_user = batch_get_user_groups(db_session, user_ids)
+
+    # Batch-fetch SCIM mappings to mark synced users
+    scim_synced_ids: set[UUID] = set()
+    try:
+        from onyx.db.models import ScimUserMapping
+
+        scim_mappings = db_session.scalars(
+            select(ScimUserMapping.user_id).where(ScimUserMapping.user_id.in_(user_ids))
+        ).all()
+        scim_synced_ids = set(scim_mappings)
+    except Exception:
+        logger.warning(
+            "Failed to fetch SCIM mappings; marking all users as non-synced",
+            exc_info=True,
+        )
+
     return PaginatedReturn(
         items=[
-            FullUserSnapshot.from_user_model(user) for user in filtered_accepted_users
+            FullUserSnapshot.from_user_model(
+                user,
+                groups=[
+                    UserGroupInfo(id=gid, name=gname)
+                    for gid, gname in groups_by_user.get(user.id, [])
+                ],
+                is_scim_synced=user.id in scim_synced_ids,
+            )
+            for user in filtered_accepted_users
         ],
         total_items=total_accepted_users_count,
     )
 
 
+@router.get("/manage/users/accepted/all", tags=PUBLIC_API_TAGS)
+def list_all_accepted_users(
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+    db_session: Session = Depends(get_session),
+) -> list[FullUserSnapshot]:
+    """Returns all accepted users without pagination.
+    Used by the admin Users page for client-side filtering/sorting."""
+    users = get_all_accepted_users(db_session=db_session)
+
+    if not users:
+        return []
+
+    user_ids = [user.id for user in users]
+    groups_by_user = batch_get_user_groups(db_session, user_ids)
+
+    # Batch-fetch SCIM mappings to mark synced users
+    scim_synced_ids: set[UUID] = set()
+    try:
+        from onyx.db.models import ScimUserMapping
+
+        scim_mappings = db_session.scalars(
+            select(ScimUserMapping.user_id).where(ScimUserMapping.user_id.in_(user_ids))
+        ).all()
+        scim_synced_ids = set(scim_mappings)
+    except Exception:
+        logger.warning(
+            "Failed to fetch SCIM mappings; marking all users as non-synced",
+            exc_info=True,
+        )
+
+    return [
+        FullUserSnapshot.from_user_model(
+            user,
+            groups=[
+                UserGroupInfo(id=gid, name=gname)
+                for gid, gname in groups_by_user.get(user.id, [])
+            ],
+            is_scim_synced=user.id in scim_synced_ids,
+        )
+        for user in users
+    ]
+
+
+@router.get("/manage/users/counts")
+def get_user_counts(
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
+    db_session: Session = Depends(get_session),
+) -> dict[str, dict[str, int]]:
+    return get_user_counts_by_role_and_status(db_session)
+
+
 @router.get("/manage/users/invited", tags=PUBLIC_API_TAGS)
 def list_invited_users(
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> list[InvitedUserSnapshot]:
     invited_emails = get_invited_users()
@@ -240,8 +331,8 @@ def list_all_users(
         if (include_api_keys or not is_api_key_email_address(user.email))
     ]
 
-    slack_users = [user for user in users if user.role == UserRole.SLACK_USER]
-    accepted_users = [user for user in users if user.role != UserRole.SLACK_USER]
+    slack_users = [user for user in users if user.account_type == AccountType.BOT]
+    accepted_users = [user for user in users if user.account_type != AccountType.BOT]
 
     accepted_emails = {user.email for user in accepted_users}
     slack_users_emails = {user.email for user in slack_users}
@@ -266,24 +357,10 @@ def list_all_users(
     if accepted_page is None or invited_page is None or slack_users_page is None:
         return AllUsersResponse(
             accepted=[
-                FullUserSnapshot(
-                    id=user.id,
-                    email=user.email,
-                    role=user.role,
-                    is_active=user.is_active,
-                    password_configured=user.password_configured,
-                )
-                for user in accepted_users
+                FullUserSnapshot.from_user_model(user) for user in accepted_users
             ],
             slack_users=[
-                FullUserSnapshot(
-                    id=user.id,
-                    email=user.email,
-                    role=user.role,
-                    is_active=user.is_active,
-                    password_configured=user.password_configured,
-                )
-                for user in slack_users
+                FullUserSnapshot.from_user_model(user) for user in slack_users
             ],
             invited=[InvitedUserSnapshot(email=email) for email in invited_emails],
             accepted_pages=1,
@@ -293,26 +370,10 @@ def list_all_users(
 
     # Otherwise, return paginated results
     return AllUsersResponse(
-        accepted=[
-            FullUserSnapshot(
-                id=user.id,
-                email=user.email,
-                role=user.role,
-                is_active=user.is_active,
-                password_configured=user.password_configured,
-            )
-            for user in accepted_users
-        ][accepted_page * USERS_PAGE_SIZE : (accepted_page + 1) * USERS_PAGE_SIZE],
-        slack_users=[
-            FullUserSnapshot(
-                id=user.id,
-                email=user.email,
-                role=user.role,
-                is_active=user.is_active,
-                password_configured=user.password_configured,
-            )
-            for user in slack_users
-        ][
+        accepted=[FullUserSnapshot.from_user_model(user) for user in accepted_users][
+            accepted_page * USERS_PAGE_SIZE : (accepted_page + 1) * USERS_PAGE_SIZE
+        ],
+        slack_users=[FullUserSnapshot.from_user_model(user) for user in slack_users][
             slack_users_page
             * USERS_PAGE_SIZE : (slack_users_page + 1)
             * USERS_PAGE_SIZE
@@ -328,7 +389,7 @@ def list_all_users(
 
 @router.get("/manage/users/download")
 def download_users_csv(
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> StreamingResponse:
     """Download all users as a CSV file."""
@@ -366,9 +427,11 @@ def download_users_csv(
 @router.put("/manage/admin/users", tags=PUBLIC_API_TAGS)
 def bulk_invite_users(
     emails: list[str] = Body(..., embed=True),
-    current_user: User = Depends(current_admin_user),
+    current_user: User = Depends(
+        require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)
+    ),
     db_session: Session = Depends(get_session),
-) -> int:
+) -> BulkInviteResponse:
     """emails are string validated. If any email fails validation, no emails are
     invited and an exception is raised."""
     tenant_id = get_current_tenant_id()
@@ -404,8 +467,7 @@ def bulk_invite_users(
         if current_invited + len(emails_needing_seats) > NUM_FREE_TRIAL_USER_INVITES:
             raise HTTPException(
                 status_code=403,
-                detail="You have hit your invite limit. "
-                "Please upgrade for unlimited invites.",
+                detail="You have hit your invite limit. Please upgrade for unlimited invites.",
             )
 
     # Check seat availability for new users
@@ -427,40 +489,47 @@ def bulk_invite_users(
     number_of_invited_users = write_invited_users(all_emails)
 
     # send out email invitations only to new users (not already invited or existing)
-    if ENABLE_EMAIL_INVITES:
+    if not ENABLE_EMAIL_INVITES:
+        email_invite_status = EmailInviteStatus.DISABLED
+    elif not EMAIL_CONFIGURED:
+        email_invite_status = EmailInviteStatus.NOT_CONFIGURED
+    else:
         try:
             for email in emails_needing_seats:
                 send_user_email_invite(email, current_user, AUTH_TYPE)
+            email_invite_status = EmailInviteStatus.SENT
         except Exception as e:
             logger.error(f"Error sending email invite to invited users: {e}")
+            email_invite_status = EmailInviteStatus.SEND_FAILED
 
-    if not MULTI_TENANT or DEV_MODE:
-        return number_of_invited_users
+    if MULTI_TENANT and not DEV_MODE:
+        # for billing purposes, write to the control plane about the number of new users
+        try:
+            logger.info("Registering tenant users")
+            fetch_ee_implementation_or_noop(
+                "onyx.server.tenants.billing", "register_tenant_users", None
+            )(tenant_id, get_live_users_count(db_session))
+        except Exception as e:
+            logger.error(f"Failed to register tenant users: {str(e)}")
+            logger.info(
+                "Reverting changes: removing users from tenant and resetting invited users"
+            )
+            write_invited_users(initial_invited_users)  # Reset to original state
+            fetch_ee_implementation_or_noop(
+                "onyx.server.tenants.user_mapping", "remove_users_from_tenant", None
+            )(new_invited_emails, tenant_id)
+            raise e
 
-    # for billing purposes, write to the control plane about the number of new users
-    try:
-        logger.info("Registering tenant users")
-        fetch_ee_implementation_or_noop(
-            "onyx.server.tenants.billing", "register_tenant_users", None
-        )(tenant_id, get_live_users_count(db_session))
-
-        return number_of_invited_users
-    except Exception as e:
-        logger.error(f"Failed to register tenant users: {str(e)}")
-        logger.info(
-            "Reverting changes: removing users from tenant and resetting invited users"
-        )
-        write_invited_users(initial_invited_users)  # Reset to original state
-        fetch_ee_implementation_or_noop(
-            "onyx.server.tenants.user_mapping", "remove_users_from_tenant", None
-        )(new_invited_emails, tenant_id)
-        raise e
+    return BulkInviteResponse(
+        invited_count=number_of_invited_users,
+        email_invite_status=email_invite_status,
+    )
 
 
 @router.patch("/manage/admin/remove-invited-user", tags=PUBLIC_API_TAGS)
 def remove_invited_user(
     user_email: UserByEmail,
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> int:
     tenant_id = get_current_tenant_id()
@@ -488,7 +557,9 @@ def remove_invited_user(
 @router.patch("/manage/admin/deactivate-user", tags=PUBLIC_API_TAGS)
 def deactivate_user_api(
     user_email: UserByEmail,
-    current_user: User = Depends(current_admin_user),
+    current_user: User = Depends(
+        require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)
+    ),
     db_session: Session = Depends(get_session),
 ) -> None:
     if current_user.email == user_email.user_email:
@@ -517,7 +588,7 @@ def deactivate_user_api(
 @router.delete("/manage/admin/delete-user", tags=PUBLIC_API_TAGS)
 async def delete_user(
     user_email: UserByEmail,
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     user_to_delete = get_user_by_email(
@@ -561,7 +632,7 @@ async def delete_user(
 @router.patch("/manage/admin/activate-user", tags=PUBLIC_API_TAGS)
 def activate_user_api(
     user_email: UserByEmail,
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     user_to_activate = get_user_by_email(
@@ -590,7 +661,7 @@ def activate_user_api(
 
 @router.get("/manage/admin/valid-domains")
 def get_valid_domains(
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> list[str]:
     return VALID_EMAIL_DOMAINS
 
@@ -601,20 +672,22 @@ def get_valid_domains(
 @router.get("/users", tags=PUBLIC_API_TAGS)
 def list_all_users_basic_info(
     include_api_keys: bool = False,
-    _: User = Depends(current_user),
+    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> list[MinimalUserSnapshot]:
     users = get_all_users(db_session)
     return [
         MinimalUserSnapshot(id=user.id, email=user.email)
         for user in users
-        if user.role != UserRole.SLACK_USER
+        if user.account_type != AccountType.BOT
         and (include_api_keys or not is_api_key_email_address(user.email))
     ]
 
 
 @router.get("/get-user-role", tags=PUBLIC_API_TAGS)
-async def get_user_role(user: User = Depends(current_user)) -> UserRoleResponse:
+async def get_user_role(
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
+) -> UserRoleResponse:
     return UserRoleResponse(role=user.role)
 
 
@@ -711,6 +784,13 @@ def _get_token_created_at(
     return get_current_token_creation_postgres(user, db_session)
 
 
+@router.get("/me/permissions", tags=PUBLIC_API_TAGS)
+def get_current_user_permissions(
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
+) -> list[str]:
+    return sorted(p.value for p in get_effective_permissions(user))
+
+
 @router.get("/me", tags=PUBLIC_API_TAGS)
 def verify_user_logged_in(
     request: Request,
@@ -761,6 +841,11 @@ def verify_user_logged_in(
             [],
         ),
     )
+    memories = [
+        MemoryItem(id=memory.id, content=memory.memory_text)
+        for memory in get_memories_for_user(user.id, db_session)
+    ]
+
     user_info = UserInfo.from_model(
         user,
         current_token_created_at=token_created_at,
@@ -771,6 +856,7 @@ def verify_user_logged_in(
             new_tenant=new_tenant,
             invitation=tenant_invitation,
         ),
+        memories=memories,
     )
 
     return user_info
@@ -782,7 +868,7 @@ def verify_user_logged_in(
 @router.patch("/temperature-override-enabled")
 def update_user_temperature_override_enabled_api(
     temperature_override_enabled: bool,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     update_user_temperature_override_enabled(
@@ -797,7 +883,7 @@ class ChosenDefaultModelRequest(BaseModel):
 @router.patch("/shortcut-enabled")
 def update_user_shortcut_enabled_api(
     shortcut_enabled: bool,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     update_user_shortcut_enabled(user.id, shortcut_enabled, db_session)
@@ -806,7 +892,7 @@ def update_user_shortcut_enabled_api(
 @router.patch("/auto-scroll")
 def update_user_auto_scroll_api(
     request: AutoScrollRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     update_user_auto_scroll(user.id, request.auto_scroll, db_session)
@@ -815,7 +901,7 @@ def update_user_auto_scroll_api(
 @router.patch("/user/theme-preference")
 def update_user_theme_preference_api(
     request: ThemePreferenceRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     update_user_theme_preference(user.id, request.theme_preference, db_session)
@@ -824,7 +910,7 @@ def update_user_theme_preference_api(
 @router.patch("/user/chat-background")
 def update_user_chat_background_api(
     request: ChatBackgroundRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     update_user_chat_background(user.id, request.chat_background, db_session)
@@ -833,7 +919,7 @@ def update_user_chat_background_api(
 @router.patch("/user/default-app-mode")
 def update_user_default_app_mode_api(
     request: DefaultAppModeRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     update_user_default_app_mode(user.id, request.default_app_mode, db_session)
@@ -842,7 +928,7 @@ def update_user_default_app_mode_api(
 @router.patch("/user/default-model")
 def update_user_default_model_api(
     request: ChosenDefaultModelRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     update_user_default_model(user.id, request.default_model, db_session)
@@ -851,7 +937,7 @@ def update_user_default_model_api(
 @router.patch("/user/personalization")
 def update_user_personalization_api(
     request: PersonalizationUpdateRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     new_name = request.name if request.name is not None else user.personal_name
@@ -868,7 +954,8 @@ def update_user_personalization_api(
         else user.enable_memory_tool
     )
     existing_memories = [
-        MemoryItem(id=memory.id, content=memory.memory_text) for memory in user.memories
+        MemoryItem(id=memory.id, content=memory.memory_text)
+        for memory in get_memories_for_user(user.id, db_session)
     ]
     new_memories = (
         request.memories if request.memories is not None else existing_memories
@@ -898,7 +985,7 @@ class ReorderPinnedAssistantsRequest(BaseModel):
 @router.patch("/user/pinned-assistants")
 def update_user_pinned_assistants_api(
     request: ReorderPinnedAssistantsRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     ordered_assistant_ids = request.ordered_assistant_ids
@@ -935,7 +1022,7 @@ def update_assistant_visibility(
 def update_user_assistant_visibility_api(
     assistant_id: int,
     show: bool,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     user_preferences = UserInfo.from_model(user).preferences
@@ -955,7 +1042,7 @@ def update_user_assistant_visibility_api(
 
 @router.get("/user/assistant/preferences")
 def get_user_assistant_preferences(
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> UserSpecificAssistantPreferences | None:
     """Fetch all assistant preferences for the user."""
@@ -974,7 +1061,7 @@ def get_user_assistant_preferences(
 def update_assistant_preferences_for_user_api(
     assistant_id: int,
     new_assistant_preference: UserSpecificAssistantPreference,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     update_assistant_preferences(
@@ -985,7 +1072,7 @@ def update_assistant_preferences_for_user_api(
 
 @router.get("/user/files/recent")
 def get_recent_files(
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> list[UserFileSnapshot]:
     user_id = user.id

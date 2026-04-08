@@ -1,7 +1,7 @@
 "use client";
 
 import { FeedbackType } from "@/app/app/interfaces";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import useFeedbackController from "@/hooks/useFeedbackController";
 import { useModal } from "@/refresh-components/contexts/ModalContext";
 import { SvgThumbsDown, SvgThumbsUp } from "@opal/icons";
@@ -79,7 +79,7 @@ export default function FeedbackModal({
                   <InputLayouts.Vertical
                     name="additional_feedback"
                     title="Provide Additional Details"
-                    optional={feedbackType === "like"}
+                    suffix={feedbackType === "like" ? "optional" : undefined}
                   >
                     <InputTextAreaField
                       name="additional_feedback"
@@ -90,18 +90,18 @@ export default function FeedbackModal({
 
                 <Modal.Footer>
                   <Button
+                    prominence="secondary"
                     onClick={() => modal.toggle(false)}
-                    secondary
                     type="button"
                   >
                     Cancel
                   </Button>
                   <Button
-                    onClick={() => formikHandleSubmit()}
                     disabled={
                       isSubmitting ||
                       (feedbackType === "dislike" && (!dirty || !isValid))
                     }
+                    onClick={() => formikHandleSubmit()}
                   >
                     {isSubmitting ? "Submitting..." : "Submit"}
                   </Button>

@@ -43,8 +43,8 @@ import { SvgChevronUp, SvgChevronDown, SvgRevert } from "@opal/icons";
  * ```
  */
 export interface InputNumberProps {
-  value: number;
-  onChange: (value: number) => void;
+  value: number | null;
+  onChange: (value: number | null) => void;
   min?: number;
   max?: number;
   step?: number;
@@ -53,6 +53,7 @@ export interface InputNumberProps {
   variant?: Variants;
   disabled?: boolean;
   className?: string;
+  placeholder?: string;
 }
 
 export default function InputNumber({
@@ -66,31 +67,36 @@ export default function InputNumber({
   variant = "primary",
   disabled = false,
   className,
+  placeholder,
 }: InputNumberProps) {
   const inputRef = React.useRef<HTMLInputElement | null>(null);
-  const [inputValue, setInputValue] = React.useState(String(value));
+  const [inputValue, setInputValue] = React.useState(
+    value === null ? "" : String(value)
+  );
   const isDisabled = disabled || variant === "disabled";
 
   // Sync input value when external value changes (e.g., from stepper buttons or reset)
   React.useEffect(() => {
-    setInputValue(String(value));
+    setInputValue(value === null ? "" : String(value));
   }, [value]);
 
-  const canIncrement = max === undefined || value < max;
-  const canDecrement = min === undefined || value > min;
+  const effectiveValue = value ?? 0;
+  const canIncrement = max === undefined || effectiveValue < max;
+  const canDecrement =
+    value !== null && (min === undefined || effectiveValue > min);
   const canReset =
     showReset && defaultValue !== undefined && value !== defaultValue;
 
   const handleIncrement = () => {
     if (canIncrement) {
-      const newValue = value + step;
+      const newValue = effectiveValue + step;
       onChange(max !== undefined ? Math.min(newValue, max) : newValue);
     }
   };
 
   const handleDecrement = () => {
     if (canDecrement) {
-      const newValue = value - step;
+      const newValue = effectiveValue - step;
       onChange(min !== undefined ? Math.max(newValue, min) : newValue);
     }
   };
@@ -102,14 +108,11 @@ export default function InputNumber({
   };
 
   const handleBlur = () => {
-    // On blur, if empty, set fallback value; otherwise sync display with actual value
+    // On blur, if empty, keep as null so placeholder shows
     if (inputValue.trim() === "") {
-      let fallback = min ?? 0;
-      if (max !== undefined) fallback = Math.min(fallback, max);
-      setInputValue(String(fallback));
-      onChange(fallback);
+      onChange(null);
     } else {
-      setInputValue(String(value));
+      setInputValue(value === null ? "" : String(value));
     }
   };
 
@@ -151,6 +154,7 @@ export default function InputNumber({
         pattern="[0-9]*"
         disabled={isDisabled}
         value={inputValue}
+        placeholder={placeholder}
         onChange={handleInputChange}
         onBlur={handleBlur}
         className={cn(
@@ -163,9 +167,9 @@ export default function InputNumber({
       <div className="flex flex-row items-center gap-1">
         {showReset && (
           <Button
+            disabled={!canReset || isDisabled}
             icon={SvgRevert}
             onClick={handleReset}
-            disabled={!canReset || isDisabled}
             prominence="tertiary"
           />
         )}

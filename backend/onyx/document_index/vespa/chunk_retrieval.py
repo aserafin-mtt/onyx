@@ -1,5 +1,6 @@
 import json
 import string
+import time
 from collections.abc import Callable
 from collections.abc import Mapping
 from datetime import datetime
@@ -18,6 +19,8 @@ from onyx.background.celery.tasks.opensearch_migration.transformer import (
 )
 from onyx.configs.app_configs import LOG_VESPA_TIMING_INFORMATION
 from onyx.configs.app_configs import VESPA_LANGUAGE_OVERRIDE
+from onyx.configs.app_configs import VESPA_MIGRATION_REQUEST_TIMEOUT_S
+from onyx.configs.app_configs import VESPA_MIGRATION_SERVER_SIDE_REQUEST_TIMEOUT
 from onyx.context.search.models import IndexFilters
 from onyx.context.search.models import InferenceChunkUncleaned
 from onyx.document_index.interfaces import VespaChunkRequest
@@ -333,21 +336,33 @@ def get_all_chunks_paginated(
             "format.tensors": "short-value",
             "slices": total_slices,
             "sliceId": slice_id,
+            # When exceeded, Vespa should return gracefully with partial
+            # results. Even if no hits are returned, Vespa should still return a
+            # new continuation token representing a new spot in the linear
+            # traversal.
+            "timeout": VESPA_MIGRATION_SERVER_SIDE_REQUEST_TIMEOUT,
         }
         if continuation_token is not None:
             params["continuation"] = continuation_token
 
         response: httpx.Response | None = None
+        start_time = time.monotonic()
         try:
-            with get_vespa_http_client() as http_client:
+            with get_vespa_http_client(
+                # When exceeded, an exception is raised in our code. No progress
+                # is saved, and the task will retry this spot in the traversal
+                # later.
+                timeout=VESPA_MIGRATION_REQUEST_TIMEOUT_S
+            ) as http_client:
                 response = http_client.get(url, params=params)
                 response.raise_for_status()
         except httpx.HTTPError as e:
-            error_base = f"Failed to get chunks from Vespa slice {slice_id} with continuation token {continuation_token}."
+            error_base = (
+                f"Failed to get chunks from Vespa slice {slice_id} with continuation token "
+                f"{continuation_token} in {time.monotonic() - start_time:.3f} seconds."
+            )
             logger.exception(
-                f"Request URL: {e.request.url}\n"
-                f"Request Headers: {e.request.headers}\n"
-                f"Request Payload: {params}\n"
+                f"Request URL: {e.request.url}\nRequest Headers: {e.request.headers}\nRequest Payload: {params}\n"
             )
             error_message = (
                 response.json().get("message") if response else "No response"
@@ -495,20 +510,31 @@ def query_vespa(
             response = http_client.post(SEARCH_ENDPOINT, json=params)
             response.raise_for_status()
     except httpx.HTTPError as e:
-        error_base = "Failed to query Vespa"
-        logger.error(
-            f"{error_base}:\n"
-            f"Request URL: {e.request.url}\n"
-            f"Request Headers: {e.request.headers}\n"
-            f"Request Payload: {params}\n"
-            f"Exception: {str(e)}"
-            + (
-                f"\nResponse: {e.response.text}"
-                if isinstance(e, httpx.HTTPStatusError)
-                else ""
-            )
+        response_text = (
+            e.response.text if isinstance(e, httpx.HTTPStatusError) else None
         )
-        raise httpx.HTTPError(error_base) from e
+        status_code = (
+            e.response.status_code if isinstance(e, httpx.HTTPStatusError) else None
+        )
+        yql_value = params.get("yql", "")
+        yql_length = len(str(yql_value))
+
+        # Log each detail on its own line so log collectors capture them
+        # as separate entries rather than truncating a single multiline msg
+        logger.error(
+            f"Failed to query Vespa | "
+            f"status={status_code} | "
+            f"yql_length={yql_length} | "
+            f"exception={str(e)}"
+        )
+        if response_text:
+            logger.error(f"Vespa error response: {response_text[:1000]}")
+        logger.error(f"Vespa request URL: {e.request.url}")
+
+        # Re-raise with diagnostics so callers see what actually went wrong
+        raise httpx.HTTPError(
+            f"Failed to query Vespa (status={status_code}, " f"yql_length={yql_length})"
+        ) from e
 
     response_json: dict[str, Any] = response.json()
 

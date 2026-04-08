@@ -9,10 +9,10 @@ export interface DeleteButtonProps {
 export function DeleteButton({ onClick, disabled }: DeleteButtonProps) {
   return (
     <Button
+      disabled={disabled}
       onClick={onClick}
       icon={SvgTrash}
       tooltip="Delete"
-      disabled={disabled}
       prominence="tertiary"
       size="sm"
     />

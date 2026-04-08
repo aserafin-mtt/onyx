@@ -28,6 +28,7 @@ from onyx.access.models import DocExternalAccess
 from onyx.access.models import ElementExternalAccess
 from onyx.background.celery.apps.app_base import task_logger
 from onyx.background.celery.celery_redis import celery_find_task
+from onyx.background.celery.celery_redis import celery_get_broker_client
 from onyx.background.celery.celery_redis import celery_get_queue_length
 from onyx.background.celery.celery_redis import celery_get_queued_task_ids
 from onyx.background.celery.celery_redis import celery_get_unacked_task_ids
@@ -187,7 +188,6 @@ def check_for_doc_permissions_sync(self: Task, *, tenant_id: str) -> bool | None
     # (which lives on a different db number)
     r = get_redis_client()
     r_replica = get_redis_replica_client()
-    r_celery: Redis = self.app.broker_connection().channel().client  # type: ignore
 
     lock_beat: RedisLock = r.lock(
         OnyxRedisLocks.CHECK_CONNECTOR_DOC_PERMISSIONS_SYNC_BEAT_LOCK,
@@ -227,6 +227,7 @@ def check_for_doc_permissions_sync(self: Task, *, tenant_id: str) -> bool | None
             # tasks can be in the queue in redis, in reserved tasks (prefetched by the worker),
             # or be currently executing
             try:
+                r_celery = celery_get_broker_client(self.app)
                 validate_permission_sync_fences(
                     tenant_id, r, r_replica, r_celery, lock_beat
                 )
@@ -424,10 +425,7 @@ def connector_permission_sync_generator_task(
             raise ValueError(error_msg)
 
         if not redis_connector.permissions.fenced:  # The fence must exist
-            error_msg = (
-                f"connector_permission_sync_generator_task - fence not found: "
-                f"fence={redis_connector.permissions.fence_key}"
-            )
+            error_msg = f"connector_permission_sync_generator_task - fence not found: fence={redis_connector.permissions.fence_key}"
             _fail_doc_permission_sync_attempt(attempt_id, error_msg)
             raise ValueError(error_msg)
 
@@ -441,8 +439,7 @@ def connector_permission_sync_generator_task(
 
         if payload.celery_task_id is None:
             logger.info(
-                f"connector_permission_sync_generator_task - Waiting for fence: "
-                f"fence={redis_connector.permissions.fence_key}"
+                f"connector_permission_sync_generator_task - Waiting for fence: fence={redis_connector.permissions.fence_key}"
             )
             sleep(1)
             continue
@@ -477,6 +474,8 @@ def connector_permission_sync_generator_task(
             cc_pair = get_connector_credential_pair_from_id(
                 db_session=db_session,
                 cc_pair_id=cc_pair_id,
+                eager_load_connector=True,
+                eager_load_credential=True,
             )
             if cc_pair is None:
                 raise ValueError(
@@ -608,8 +607,7 @@ def connector_permission_sync_generator_task(
                 docs_with_permission_errors=docs_with_errors,
             )
             task_logger.info(
-                f"Completed doc permission sync attempt {attempt_id}: "
-                f"{tasks_generated} docs, {docs_with_errors} errors"
+                f"Completed doc permission sync attempt {attempt_id}: {tasks_generated} docs, {docs_with_errors} errors"
             )
 
             redis_connector.permissions.generator_complete = tasks_generated
@@ -716,9 +714,7 @@ def element_update_permissions(
 
             elapsed = time.monotonic() - start
             task_logger.info(
-                f"{element_type}={element_id} "
-                f"action=update_permissions "
-                f"elapsed={elapsed:.2f}"
+                f"{element_type}={element_id} action=update_permissions elapsed={elapsed:.2f}"
             )
     except Exception as e:
         task_logger.exception(
@@ -900,8 +896,7 @@ def validate_permission_sync_fence(
         tasks_not_in_celery += 1
 
     task_logger.info(
-        "validate_permission_sync_fence task check: "
-        f"tasks_scanned={tasks_scanned} tasks_not_in_celery={tasks_not_in_celery}"
+        f"validate_permission_sync_fence task check: tasks_scanned={tasks_scanned} tasks_not_in_celery={tasks_not_in_celery}"
     )
 
     # we're active if there are still tasks to run and those tasks all exist in celery
@@ -1007,7 +1002,10 @@ class PermissionSyncCallback(IndexingHeartbeatInterface):
 
 
 def monitor_ccpair_permissions_taskset(
-    tenant_id: str, key_bytes: bytes, r: Redis, db_session: Session  # noqa: ARG001
+    tenant_id: str,
+    key_bytes: bytes,
+    r: Redis,  # noqa: ARG001
+    db_session: Session,
 ) -> None:
     fence_key = key_bytes.decode("utf-8")
     cc_pair_id_str = RedisConnector.get_id_from_fence_key(fence_key)
@@ -1031,8 +1029,7 @@ def monitor_ccpair_permissions_taskset(
         payload = redis_connector.permissions.payload
     except ValidationError:
         task_logger.exception(
-            "Permissions sync payload failed to validate. "
-            "Schema may have been updated."
+            "Permissions sync payload failed to validate. Schema may have been updated."
         )
         return
 
@@ -1041,11 +1038,7 @@ def monitor_ccpair_permissions_taskset(
 
     remaining = redis_connector.permissions.get_remaining()
     task_logger.info(
-        f"Permissions sync progress: "
-        f"cc_pair={cc_pair_id} "
-        f"id={payload.id} "
-        f"remaining={remaining} "
-        f"initial={initial}"
+        f"Permissions sync progress: cc_pair={cc_pair_id} id={payload.id} remaining={remaining} initial={initial}"
     )
 
     # Add telemetry for permission syncing progress
@@ -1064,10 +1057,7 @@ def monitor_ccpair_permissions_taskset(
 
     mark_cc_pair_as_permissions_synced(db_session, int(cc_pair_id), payload.started)
     task_logger.info(
-        f"Permissions sync finished: "
-        f"cc_pair={cc_pair_id} "
-        f"id={payload.id} "
-        f"num_synced={initial}"
+        f"Permissions sync finished: cc_pair={cc_pair_id} id={payload.id} num_synced={initial}"
     )
 
     # Add telemetry for permission syncing complete

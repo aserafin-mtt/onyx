@@ -9,7 +9,6 @@ import type { IconProps } from "@opal/types";
 import { getFileExtension, isImageExtension } from "@/lib/utils";
 import { UserFileStatus } from "@/app/app/projects/projectsService";
 import CreateButton from "@/refresh-components/buttons/CreateButton";
-import Button from "@/refresh-components/buttons/Button";
 import SimpleLoader from "@/refresh-components/loaders/SimpleLoader";
 import AttachmentButton from "@/refresh-components/buttons/AttachmentButton";
 import Modal from "@/refresh-components/Modal";
@@ -25,7 +24,7 @@ import {
 } from "@opal/icons";
 import { Section } from "@/layouts/general-layouts";
 import useFilter from "@/hooks/useFilter";
-import { Button as OpalButton } from "@opal/components";
+import { Button } from "@opal/components";
 import ScrollIndicatorDiv from "@/refresh-components/ScrollIndicatorDiv";
 
 function getIcon(
@@ -269,25 +268,25 @@ export default function UserFilesModal({
                   {selectedCount} {selectedCount === 1 ? "file" : "files"}{" "}
                   selected
                 </Text>
-                <OpalButton
+                <Button
                   icon={SvgEye}
                   prominence="tertiary"
                   size="sm"
                   onClick={() => setShowOnlySelected(!showOnlySelected)}
-                  transient={showOnlySelected}
+                  interaction={showOnlySelected ? "hover" : "rest"}
                 />
-                <OpalButton
+                <Button
+                  disabled={selectedCount === 0}
                   icon={SvgXCircle}
                   prominence="tertiary"
                   size="sm"
                   onClick={handleDeselectAll}
-                  disabled={selectedCount === 0}
                 />
               </Section>
             )}
 
             {/* Right side: Done button */}
-            <Button secondary onClick={() => toggle(false)}>
+            <Button prominence="secondary" onClick={() => toggle(false)}>
               Done
             </Button>
           </Modal.Footer>

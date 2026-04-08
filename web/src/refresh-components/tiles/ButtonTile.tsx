@@ -31,12 +31,12 @@ export default function ButtonTile({
   const Icon = icon;
 
   return (
-    <Interactive.Base
+    <Interactive.Stateless
       variant="default"
       prominence="secondary"
       group="group/Tile"
-      onClick={onClick}
       disabled={disabled}
+      onClick={onClick}
     >
       <div className={cn("rounded-08 p-1.5", "flex flex-row gap-2")}>
         {(title || description) && (
@@ -72,6 +72,6 @@ export default function ButtonTile({
           </div>
         )}
       </div>
-    </Interactive.Base>
+    </Interactive.Stateless>
   );
 }

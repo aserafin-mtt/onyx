@@ -21,9 +21,7 @@ import asyncio
 import httpx
 from fastapi import APIRouter
 from fastapi import Depends
-from fastapi import HTTPException
 
-from ee.onyx.auth.users import current_admin_user
 from ee.onyx.server.tenants.access import control_plane_dep
 from ee.onyx.server.tenants.billing import fetch_billing_information
 from ee.onyx.server.tenants.billing import fetch_customer_portal_session
@@ -39,10 +37,14 @@ from ee.onyx.server.tenants.models import SubscriptionSessionResponse
 from ee.onyx.server.tenants.models import SubscriptionStatusResponse
 from ee.onyx.server.tenants.product_gating import overwrite_full_gated_set
 from ee.onyx.server.tenants.product_gating import store_product_gating
+from onyx.auth.permissions import require_permission
 from onyx.auth.users import User
 from onyx.configs.app_configs import STRIPE_PUBLISHABLE_KEY_OVERRIDE
 from onyx.configs.app_configs import STRIPE_PUBLISHABLE_KEY_URL
 from onyx.configs.app_configs import WEB_DOMAIN
+from onyx.db.enums import Permission
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.utils.logger import setup_logger
 from shared_configs.contextvars import CURRENT_TENANT_ID_CONTEXTVAR
 from shared_configs.contextvars import get_current_tenant_id
@@ -98,7 +100,7 @@ def gate_product_full_sync(
 
 @router.get("/billing-information")
 async def billing_information(
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> BillingInformation | SubscriptionStatusResponse:
     logger.info("Fetching billing information")
     tenant_id = get_current_tenant_id()
@@ -107,7 +109,7 @@ async def billing_information(
 
 @router.post("/create-customer-portal-session")
 async def create_customer_portal_session(
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> dict:
     """Create a Stripe customer portal session via the control plane."""
     tenant_id = get_current_tenant_id()
@@ -116,15 +118,20 @@ async def create_customer_portal_session(
     try:
         portal_url = fetch_customer_portal_session(tenant_id, return_url)
         return {"stripe_customer_portal_url": portal_url}
-    except Exception as e:
+    except OnyxError:
+        raise
+    except Exception:
         logger.exception("Failed to create customer portal session")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise OnyxError(
+            OnyxErrorCode.INTERNAL_ERROR,
+            "Failed to create customer portal session",
+        )
 
 
 @router.post("/create-checkout-session")
 async def create_checkout_session(
     request: CreateCheckoutSessionRequest | None = None,
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> dict:
     """Create a Stripe checkout session via the control plane."""
     tenant_id = get_current_tenant_id()
@@ -134,28 +141,38 @@ async def create_checkout_session(
     try:
         checkout_url = fetch_stripe_checkout_session(tenant_id, billing_period, seats)
         return {"stripe_checkout_url": checkout_url}
-    except Exception as e:
+    except OnyxError:
+        raise
+    except Exception:
         logger.exception("Failed to create checkout session")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise OnyxError(
+            OnyxErrorCode.INTERNAL_ERROR,
+            "Failed to create checkout session",
+        )
 
 
 @router.post("/create-subscription-session")
 async def create_subscription_session(
     request: CreateSubscriptionSessionRequest | None = None,
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> SubscriptionSessionResponse:
     try:
         tenant_id = CURRENT_TENANT_ID_CONTEXTVAR.get()
         if not tenant_id:
-            raise HTTPException(status_code=400, detail="Tenant ID not found")
+            raise OnyxError(OnyxErrorCode.VALIDATION_ERROR, "Tenant ID not found")
 
         billing_period = request.billing_period if request else "monthly"
         session_id = fetch_stripe_checkout_session(tenant_id, billing_period)
         return SubscriptionSessionResponse(sessionId=session_id)
 
-    except Exception as e:
+    except OnyxError:
+        raise
+    except Exception:
         logger.exception("Failed to create subscription session")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise OnyxError(
+            OnyxErrorCode.INTERNAL_ERROR,
+            "Failed to create subscription session",
+        )
 
 
 @router.get("/stripe-publishable-key")
@@ -186,18 +203,18 @@ async def get_stripe_publishable_key() -> StripePublishableKeyResponse:
         if STRIPE_PUBLISHABLE_KEY_OVERRIDE:
             key = STRIPE_PUBLISHABLE_KEY_OVERRIDE.strip()
             if not key.startswith("pk_"):
-                raise HTTPException(
-                    status_code=500,
-                    detail="Invalid Stripe publishable key format",
+                raise OnyxError(
+                    OnyxErrorCode.INTERNAL_ERROR,
+                    "Invalid Stripe publishable key format",
                 )
             _stripe_publishable_key_cache = key
             return StripePublishableKeyResponse(publishable_key=key)
 
         # Fall back to S3 bucket
         if not STRIPE_PUBLISHABLE_KEY_URL:
-            raise HTTPException(
-                status_code=500,
-                detail="Stripe publishable key is not configured",
+            raise OnyxError(
+                OnyxErrorCode.INTERNAL_ERROR,
+                "Stripe publishable key is not configured",
             )
 
         try:
@@ -208,15 +225,15 @@ async def get_stripe_publishable_key() -> StripePublishableKeyResponse:
 
                 # Validate key format
                 if not key.startswith("pk_"):
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Invalid Stripe publishable key format",
+                    raise OnyxError(
+                        OnyxErrorCode.INTERNAL_ERROR,
+                        "Invalid Stripe publishable key format",
                     )
 
                 _stripe_publishable_key_cache = key
                 return StripePublishableKeyResponse(publishable_key=key)
         except httpx.HTTPError:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to fetch Stripe publishable key",
+            raise OnyxError(
+                OnyxErrorCode.INTERNAL_ERROR,
+                "Failed to fetch Stripe publishable key",
             )

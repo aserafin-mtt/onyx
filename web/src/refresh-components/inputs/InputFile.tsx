@@ -128,8 +128,8 @@ export default function InputFile({
 
   const rightSection = (
     <Button
-      icon={SvgPaperclip}
       disabled={isNonEditable}
+      icon={SvgPaperclip}
       onClick={noProp(openFilePicker)}
       type="button"
       prominence="tertiary"

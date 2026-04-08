@@ -8,7 +8,7 @@ from fastapi import Depends
 from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
-from onyx.auth.users import current_admin_user
+from onyx.auth.permissions import require_permission
 from onyx.auth.users import current_curator_or_admin_user
 from onyx.background.celery.versioned_apps.client import app as client_app
 from onyx.configs.app_configs import GENERATIVE_MODEL_ACCESS_CHECK_FREQ
@@ -23,6 +23,7 @@ from onyx.db.connector_credential_pair import (
 )
 from onyx.db.engine.sql_engine import get_session
 from onyx.db.enums import ConnectorCredentialPairStatus
+from onyx.db.enums import Permission
 from onyx.db.feedback import fetch_docs_ranked_by_boost_for_user
 from onyx.db.feedback import update_document_boost_for_user
 from onyx.db.feedback import update_document_hidden_for_user
@@ -105,7 +106,7 @@ def document_hidden_update(
 
 @router.get("/admin/genai-api-key/validate")
 def validate_existing_genai_api_key(
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> None:
     # Only validate every so often
     kv_store = get_kv_store()
@@ -154,10 +155,7 @@ def create_deletion_attempt_for_connector_id(
         get_editable=True,
     )
     if cc_pair is None:
-        error = (
-            f"Connector with ID '{connector_id}' and credential ID "
-            f"'{credential_id}' does not exist. Has it already been deleted?"
-        )
+        error = f"Connector with ID '{connector_id}' and credential ID '{credential_id}' does not exist. Has it already been deleted?"
         logger.error(error)
         raise HTTPException(
             status_code=404,
@@ -200,8 +198,7 @@ def create_deletion_attempt_for_connector_id(
     )
 
     logger.info(
-        f"create_deletion_attempt_for_connector_id - running check_for_connector_deletion: "
-        f"cc_pair={cc_pair.id}"
+        f"create_deletion_attempt_for_connector_id - running check_for_connector_deletion: cc_pair={cc_pair.id}"
     )
 
     if cc_pair.connector.source == DocumentSource.FILE:

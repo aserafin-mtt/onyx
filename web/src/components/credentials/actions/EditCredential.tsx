@@ -1,5 +1,5 @@
-import Button from "@/refresh-components/buttons/Button";
-import Text from "@/components/ui/text";
+import { Button } from "@opal/components";
+import { Text } from "@opal/components";
 
 import { FaNewspaper, FaTrash } from "react-icons/fa";
 import { TextFormField, TypedFileUploadFormField } from "@/components/Field";
@@ -50,7 +50,7 @@ export default function EditCredential({
 
   return (
     <div className="flex flex-col gap-y-6">
-      <Text>
+      <Text as="p">
         Ensure that you update to a credential with the proper permissions!
       </Text>
 
@@ -93,15 +93,10 @@ export default function EditCredential({
               )
             )}
             <div className="flex justify-between w-full">
-              <Button onClick={() => resetForm()} leftIcon={SvgTrash}>
+              <Button onClick={() => resetForm()} icon={SvgTrash}>
                 Reset Changes
               </Button>
-              <Button
-                type="submit"
-                disabled={isSubmitting}
-                className="bg-indigo-500 hover:bg-indigo-400"
-                leftIcon={FaNewspaper}
-              >
+              <Button disabled={isSubmitting} type="submit" icon={FaNewspaper}>
                 Update
               </Button>
             </div>

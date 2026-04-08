@@ -4,11 +4,12 @@ from fastapi import HTTPException
 from sqlalchemy.orm import Session
 
 from onyx.access.hierarchy_access import get_user_external_group_ids
-from onyx.auth.users import current_user
+from onyx.auth.permissions import require_permission
 from onyx.configs.app_configs import ENABLE_OPENSEARCH_INDEXING_FOR_ONYX
 from onyx.configs.constants import DocumentSource
 from onyx.db.document import get_accessible_documents_for_hierarchy_node_paginated
 from onyx.db.engine.sql_engine import get_session
+from onyx.db.enums import Permission
 from onyx.db.hierarchy import get_accessible_hierarchy_nodes_for_source
 from onyx.db.models import User
 from onyx.db.opensearch_migration import get_opensearch_retrieval_state
@@ -25,10 +26,7 @@ from onyx.server.features.hierarchy.models import HierarchyNodeDocumentsResponse
 from onyx.server.features.hierarchy.models import HierarchyNodesResponse
 from onyx.server.features.hierarchy.models import HierarchyNodeSummary
 
-OPENSEARCH_NOT_ENABLED_MESSAGE = (
-    "Per-source knowledge selection is coming soon in v3.0! "
-    "OpenSearch indexing must be enabled to use this feature."
-)
+OPENSEARCH_NOT_ENABLED_MESSAGE = "Per-source knowledge selection is coming soon in v3.0! OpenSearch indexing must be enabled to use this feature."
 
 MIGRATION_STATUS_MESSAGE = (
     "Our records indicate that the transition to OpenSearch is still in progress. "
@@ -54,18 +52,14 @@ def _require_opensearch(db_session: Session) -> None:
         )
 
 
-def _get_user_access_info(
-    user: User | None, db_session: Session
-) -> tuple[str | None, list[str]]:
-    if not user:
-        return None, []
+def _get_user_access_info(user: User, db_session: Session) -> tuple[str, list[str]]:
     return user.email, get_user_external_group_ids(db_session, user)
 
 
 @router.get(HIERARCHY_NODES_LIST_PATH)
 def list_accessible_hierarchy_nodes(
     source: DocumentSource,
-    user: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> HierarchyNodesResponse:
     _require_opensearch(db_session)
@@ -92,7 +86,7 @@ def list_accessible_hierarchy_nodes(
 @router.post(HIERARCHY_NODE_DOCUMENTS_PATH)
 def list_accessible_hierarchy_node_documents(
     documents_request: HierarchyNodeDocumentsRequest,
-    user: User | None = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> HierarchyNodeDocumentsResponse:
     _require_opensearch(db_session)

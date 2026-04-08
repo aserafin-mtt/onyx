@@ -1,16 +1,15 @@
 "use client";
 
 import CardSection from "@/components/admin/CardSection";
-import { AdminPageTitle } from "@/components/admin/Title";
 import {
   DatePickerField,
   FieldLabel,
   TextArrayField,
   TextFormField,
 } from "@/components/Field";
-import { BrainIcon } from "@/components/icons/icons";
+import * as SettingsLayouts from "@/layouts/settings-layouts";
 import Modal from "@/refresh-components/Modal";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import SwitchField from "@/refresh-components/form/SwitchField";
 import { Form, Formik, FormikState, useFormikContext } from "formik";
 import { useState } from "react";
@@ -23,6 +22,7 @@ import {
 import { sanitizeKGConfig } from "@/app/admin/kg/utils";
 import useSWR from "swr";
 import { errorHandlingFetcher } from "@/lib/fetcher";
+import { SWR_KEYS } from "@/lib/swr-keys";
 import { toast } from "@/hooks/useToast";
 import Title from "@/components/ui/title";
 import { redirect } from "next/navigation";
@@ -31,6 +31,9 @@ import KGEntityTypes from "@/app/admin/kg/KGEntityTypes";
 import Text from "@/refresh-components/texts/Text";
 import { cn } from "@/lib/utils";
 import { SvgSettings } from "@opal/icons";
+import { ADMIN_ROUTES } from "@/lib/admin-routes";
+
+const route = ADMIN_ROUTES.KNOWLEDGE_GRAPH;
 
 function createDomainField(
   name: string,
@@ -197,7 +200,7 @@ function KGConfiguration({
                 disabled={!props.values.enabled}
               />
             </div>
-            <Button type="submit" disabled={!props.dirty}>
+            <Button disabled={!props.dirty} type="submit">
               Submit
             </Button>
           </div>
@@ -213,13 +216,13 @@ function Main() {
     data: configData,
     isLoading: configIsLoading,
     mutate: configMutate,
-  } = useSWR<KGConfigRaw>("/api/admin/kg/config", errorHandlingFetcher);
+  } = useSWR<KGConfigRaw>(SWR_KEYS.kgConfig, errorHandlingFetcher);
   const {
     data: sourceAndEntityTypesData,
     isLoading: entityTypesIsLoading,
     mutate: entityTypesMutate,
   } = useSWR<SourceAndEntityTypeView>(
-    "/api/admin/kg/entity-types",
+    SWR_KEYS.kgEntityTypes,
     errorHandlingFetcher
   );
 
@@ -272,7 +275,7 @@ function Main() {
             entities you want to model afterwards.
           </Text>
           <Button
-            leftIcon={SvgSettings}
+            icon={SvgSettings}
             onClick={() => setConfigureModalShown(true)}
           >
             Configure Knowledge Graph
@@ -324,12 +327,11 @@ export default function Page() {
   }
 
   return (
-    <>
-      <AdminPageTitle
-        title="Knowledge Graph"
-        icon={<BrainIcon size={32} className="my-auto" />}
-      />
-      <Main />
-    </>
+    <SettingsLayouts.Root>
+      <SettingsLayouts.Header icon={route.icon} title={route.title} separator />
+      <SettingsLayouts.Body>
+        <Main />
+      </SettingsLayouts.Body>
+    </SettingsLayouts.Root>
   );
 }

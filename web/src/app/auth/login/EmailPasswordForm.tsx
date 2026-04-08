@@ -2,7 +2,7 @@
 
 import { toast } from "@/hooks/useToast";
 import { basicLogin, basicSignup } from "@/lib/user";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import { Form, Formik } from "formik";
 import * as Yup from "yup";
 import { requestEmailVerification } from "../lib";
@@ -18,6 +18,7 @@ import { validateInternalRedirect } from "@/lib/auth/redirectValidation";
 import { APIFormFieldState } from "@/refresh-components/form/types";
 import { SvgArrowRightCircle } from "@opal/icons";
 import { useCaptcha } from "@/lib/hooks/useCaptcha";
+import Spacer from "@/refresh-components/Spacer";
 
 interface EmailPasswordFormProps {
   isSignup?: boolean;
@@ -106,13 +107,14 @@ export default function EmailPasswordForm({
             if (!response.ok) {
               setIsWorking(false);
 
-              const errorDetail: any = (await response.json()).detail;
+              const errorBody: any = await response.json();
+              const errorDetail = errorBody.detail;
               let errorMsg: string = "Unknown error";
-              if (typeof errorDetail === "object" && errorDetail.reason) {
-                errorMsg = errorDetail.reason;
-              } else if (errorDetail === "REGISTER_USER_ALREADY_EXISTS") {
+              if (errorDetail === "REGISTER_USER_ALREADY_EXISTS") {
                 errorMsg =
                   "An account already exists with the specified email.";
+              } else if (typeof errorDetail === "string" && errorDetail) {
+                errorMsg = errorDetail;
               }
               if (response.status === 429) {
                 errorMsg = "Too many requests. Please try again later.";
@@ -239,10 +241,11 @@ export default function EmailPasswordForm({
                 )}
               />
 
+              <Spacer rem={0.25} />
               <Button
-                type="submit"
-                className="w-full mt-1"
                 disabled={isSubmitting || !isValid || !dirty}
+                type="submit"
+                width="full"
                 rightIcon={SvgArrowRightCircle}
               >
                 {isJoin ? "Join" : isSignup ? "Create Account" : "Sign In"}

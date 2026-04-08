@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import Modal, { BasicModalFooter } from "@/refresh-components/Modal";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import { toast } from "@/hooks/useToast";
 import { SvgArrowRight, SvgUsers, SvgX } from "@opal/icons";
 import { logout } from "@/lib/user";
@@ -48,7 +48,11 @@ export default function NewTenantModal({
 
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({}));
-          throw new Error(errorData.message || "Failed to accept invitation");
+          throw new Error(
+            errorData.detail ||
+              errorData.message ||
+              "Failed to accept invitation"
+          );
         }
 
         toast.success("You have accepted the invitation.");
@@ -92,7 +96,11 @@ export default function NewTenantModal({
 
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData.message || "Failed to decline invitation");
+        throw new Error(
+          errorData.detail ||
+            errorData.message ||
+            "Failed to decline invitation"
+        );
       }
 
       toast.info("You have declined the invitation.");
@@ -119,7 +127,7 @@ export default function NewTenantModal({
     : `Your request to join ${tenantInfo.number_of_users} other users of ${APP_DOMAIN} has been approved.`;
 
   const description = isInvite
-    ? `By accepting this invitation, you will join the existing ${APP_DOMAIN} team and lose access to your current team. Note: you will lose access to your current assistants, prompts, chats, and connected sources.`
+    ? `By accepting this invitation, you will join the existing ${APP_DOMAIN} team and lose access to your current team. Note: you will lose access to your current agents, prompts, chats, and connected sources.`
     : `To finish joining your team, please reauthenticate with ${user?.email}.`;
 
   return (
@@ -137,10 +145,10 @@ export default function NewTenantModal({
             cancel={
               isInvite ? (
                 <Button
-                  onClick={handleRejectInvite}
-                  secondary
                   disabled={isLoading}
-                  leftIcon={SvgX}
+                  prominence="secondary"
+                  onClick={handleRejectInvite}
+                  icon={SvgX}
                 >
                   Decline
                 </Button>
@@ -148,8 +156,8 @@ export default function NewTenantModal({
             }
             submit={
               <Button
-                onClick={handleJoinTenant}
                 disabled={isLoading}
+                onClick={handleJoinTenant}
                 rightIcon={SvgArrowRight}
               >
                 {isLoading

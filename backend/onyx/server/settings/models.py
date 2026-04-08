@@ -2,11 +2,18 @@ from datetime import datetime
 from enum import Enum
 
 from pydantic import BaseModel
+from pydantic import Field
 
+from onyx.configs.app_configs import DEFAULT_USER_FILE_MAX_UPLOAD_SIZE_MB
+from onyx.configs.app_configs import DISABLE_VECTOR_DB
+from onyx.configs.app_configs import MAX_ALLOWED_UPLOAD_SIZE_MB
 from onyx.configs.constants import NotificationType
 from onyx.configs.constants import QueryHistoryType
 from onyx.db.models import Notification as NotificationDBModel
 from shared_configs.configs import POSTGRES_DEFAULT_SCHEMA
+
+DEFAULT_FILE_TOKEN_COUNT_THRESHOLD_K_VECTOR_DB = 200
+DEFAULT_FILE_TOKEN_COUNT_THRESHOLD_K_NO_VECTOR_DB = 10000
 
 
 class PageType(str, Enum):
@@ -19,6 +26,7 @@ class ApplicationStatus(str, Enum):
     PAYMENT_REMINDER = "payment_reminder"
     GRACE_PERIOD = "grace_period"
     GATED_ACCESS = "gated_access"
+    SEAT_LIMIT_EXCEEDED = "seat_limit_exceeded"
 
 
 class Notification(BaseModel):
@@ -59,9 +67,11 @@ class Settings(BaseModel):
     deep_research_enabled: bool | None = None
     search_ui_enabled: bool | None = None
 
-    # Enterprise features flag - set by license enforcement at runtime
-    # When LICENSE_ENFORCEMENT_ENABLED=true, this reflects license status
-    # When LICENSE_ENFORCEMENT_ENABLED=false, defaults to False
+    # Whether EE features are unlocked for use.
+    # Depends on license status: True when the user has a valid license
+    # (ACTIVE, GRACE_PERIOD, PAYMENT_REMINDER), False when there's no license
+    # or the license is expired (GATED_ACCESS).
+    # This controls UI visibility of EE features (user groups, analytics, RBAC, etc.).
     ee_features_enabled: bool = False
 
     temperature_override_enabled: bool | None = False
@@ -75,12 +85,22 @@ class Settings(BaseModel):
 
     # User Knowledge settings
     user_knowledge_enabled: bool | None = True
+    user_file_max_upload_size_mb: int | None = Field(
+        default=DEFAULT_USER_FILE_MAX_UPLOAD_SIZE_MB, ge=0
+    )
+    file_token_count_threshold_k: int | None = Field(
+        default=None, ge=0  # thousands of tokens; None = context-aware default
+    )
 
     # Connector settings
     show_extra_connectors: bool | None = True
 
     # Default Assistant settings
     disable_default_assistant: bool | None = False
+
+    # Seat usage - populated by license enforcement when seat limit is exceeded
+    seat_count: int | None = None
+    used_seats: int | None = None
 
     # OpenSearch migration
     opensearch_indexing_enabled: bool = False
@@ -96,3 +116,18 @@ class UserSettings(Settings):
     # False when DISABLE_VECTOR_DB is set — connectors, RAG search, and
     # document sets are unavailable.
     vector_db_enabled: bool = True
+    # True when hooks are available: single-tenant EE deployments only.
+    hooks_enabled: bool = False
+    # Application version, read from the ONYX_VERSION env var at startup.
+    version: str | None = None
+    # Hard ceiling for user_file_max_upload_size_mb, derived from env var.
+    max_allowed_upload_size_mb: int = MAX_ALLOWED_UPLOAD_SIZE_MB
+    # Factory defaults so the frontend can show a "restore default" button.
+    default_user_file_max_upload_size_mb: int = DEFAULT_USER_FILE_MAX_UPLOAD_SIZE_MB
+    default_file_token_count_threshold_k: int = Field(
+        default_factory=lambda: (
+            DEFAULT_FILE_TOKEN_COUNT_THRESHOLD_K_NO_VECTOR_DB
+            if DISABLE_VECTOR_DB
+            else DEFAULT_FILE_TOKEN_COUNT_THRESHOLD_K_VECTOR_DB
+        )
+    )

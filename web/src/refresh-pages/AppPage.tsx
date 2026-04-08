@@ -1,19 +1,19 @@
 "use client";
 
 import { redirect, useRouter, useSearchParams } from "next/navigation";
-import { HealthCheckBanner } from "@/components/health/healthcheck";
-import {
-  personaIncludesRetrieval,
-  getAvailableContextTokens,
-} from "@/app/app/services/lib";
+import { personaIncludesRetrieval } from "@/app/app/services/lib";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { toast } from "@/hooks/useToast";
+import { toast, useToastFromQuery } from "@/hooks/useToast";
 import { SEARCH_PARAM_NAMES } from "@/app/app/services/searchParams";
+import { Section } from "@/layouts/general-layouts";
 import { useFederatedConnectors, useFilters, useLlmManager } from "@/lib/hooks";
 import { useForcedTools } from "@/lib/hooks/useForcedTools";
 import OnyxInitializingLoader from "@/components/OnyxInitializingLoader";
 import { OnyxDocument, MinimalOnyxDocument } from "@/lib/search/interfaces";
-import { useSettingsContext } from "@/providers/SettingsProvider";
+import {
+  useSettingsContext,
+  useVectorDbEnabled,
+} from "@/providers/SettingsProvider";
 import Dropzone from "react-dropzone";
 import AppInputBar, { AppInputBarHandle } from "@/sections/input/AppInputBar";
 import useChatSessions from "@/hooks/useChatSessions";
@@ -22,12 +22,9 @@ import useTags from "@/hooks/useTags";
 import { useDocumentSets } from "@/lib/hooks/useDocumentSets";
 import { useAgents } from "@/hooks/useAgents";
 import { AppPopup } from "@/app/app/components/AppPopup";
-import ExceptionTraceModal from "@/components/modals/ExceptionTraceModal";
 import { useUser } from "@/providers/UserProvider";
-import NoAssistantModal from "@/components/modals/NoAssistantModal";
-import TextViewModal from "@/sections/modals/TextViewModal";
-import CodeViewModal from "@/sections/modals/CodeViewModal";
-import { getCodeLanguage } from "@/lib/languages";
+import NoAgentModal from "@/components/modals/NoAgentModal";
+import PreviewModal from "@/sections/modals/PreviewModal";
 import Modal from "@/refresh-components/Modal";
 import { useSendMessageToParent } from "@/lib/extension/utils";
 import { SUBMIT_MESSAGE_TYPES } from "@/lib/extension/constants";
@@ -36,13 +33,17 @@ import { SourceMetadata } from "@/lib/search/interfaces";
 import { FederatedConnectorDetail, UserRole, ValidSources } from "@/lib/types";
 import DocumentsSidebar from "@/sections/document-sidebar/DocumentsSidebar";
 import useChatController from "@/hooks/useChatController";
+import useMultiModelChat from "@/hooks/useMultiModelChat";
+import ModelSelector from "@/refresh-components/popovers/ModelSelector";
 import useAgentController from "@/hooks/useAgentController";
 import useChatSessionController from "@/hooks/useChatSessionController";
 import useDeepResearchToggle from "@/hooks/useDeepResearchToggle";
 import useIsDefaultAgent from "@/hooks/useIsDefaultAgent";
+import AgentDescription from "@/app/app/components/AgentDescription";
 import {
   useChatSessionStore,
   useCurrentMessageHistory,
+  useCurrentMessageTree,
 } from "@/app/app/stores/useChatSessionStore";
 import {
   useCurrentChatState,
@@ -55,22 +56,22 @@ import ChatScrollContainer, {
 } from "@/sections/chat/ChatScrollContainer";
 import ProjectContextPanel from "@/app/app/components/projects/ProjectContextPanel";
 import { useProjectsContext } from "@/providers/ProjectsContext";
-import {
-  getProjectTokenCount,
-  getMaxSelectedDocumentTokens,
-} from "@/app/app/projects/projectsService";
+import { getProjectTokenCount } from "@/app/app/projects/projectsService";
 import ProjectChatSessionList from "@/app/app/components/projects/ProjectChatSessionList";
 import { cn } from "@/lib/utils";
 import Suggestions from "@/sections/Suggestions";
-import OnboardingFlow from "@/refresh-components/onboarding/OnboardingFlow";
-import { OnboardingStep } from "@/refresh-components/onboarding/types";
+import OnboardingFlow from "@/sections/onboarding/OnboardingFlow";
+import { OnboardingStep } from "@/interfaces/onboarding";
 import { useShowOnboarding } from "@/hooks/useShowOnboarding";
 import * as AppLayouts from "@/layouts/app-layouts";
 import { SvgChevronDown, SvgFileText } from "@opal/icons";
 import { Button } from "@opal/components";
+import { IllustrationContent } from "@opal/layouts";
+import SvgNotFound from "@opal/illustrations/not-found";
+import SvgNoAccess from "@opal/illustrations/no-access";
 import Spacer from "@/refresh-components/Spacer";
-import { DEFAULT_CONTEXT_TOKENS } from "@/lib/constants";
 import useAppFocus from "@/hooks/useAppFocus";
+import { useSidebarState } from "@/layouts/sidebar-layouts";
 import { useQueryController } from "@/providers/QueryControllerProvider";
 import WelcomeMessage from "@/app/app/components/WelcomeMessage";
 import ChatUI from "@/sections/chat/ChatUI";
@@ -78,7 +79,6 @@ import { eeGated } from "@/ce";
 import EESearchUI from "@/ee/sections/SearchUI";
 const SearchUI = eeGated(EESearchUI);
 import { motion, AnimatePresence } from "motion/react";
-import { useAppMode } from "@/providers/AppModeProvider";
 
 interface FadeProps {
   show: boolean;
@@ -128,7 +128,13 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
 
   const router = useRouter();
   const appFocus = useAppFocus();
-  const { setAppMode } = useAppMode();
+
+  useToastFromQuery({
+    oauth_connected: {
+      message: "Authentication successful",
+      type: "success",
+    },
+  });
   const searchParams = useSearchParams();
 
   // Use SWR hooks for data fetching
@@ -139,7 +145,13 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
     currentChatSessionId,
     isLoading: isLoadingChatSessions,
   } = useChatSessions();
-  const { ccPairs } = useCCPairs();
+  // handle redirect if chat page is disabled
+  // NOTE: this must be done here, in a client component since
+  // settings are passed in via Context and therefore aren't
+  // available in server-side components
+  const settings = useSettingsContext();
+  const vectorDbEnabled = useVectorDbEnabled();
+  const { ccPairs } = useCCPairs(vectorDbEnabled);
   const { tags } = useTags();
   const { documentSets } = useDocumentSets();
   const {
@@ -156,12 +168,6 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
   useEffect(() => {
     setForcedToolIds([]);
   }, [currentProjectId, setForcedToolIds]);
-
-  // handle redirect if chat page is disabled
-  // NOTE: this must be done here, in a client component since
-  // settings are passed in via Context and therefore aren't
-  // available in server-side components
-  const settings = useSettingsContext();
 
   const isInitialLoad = useRef(true);
 
@@ -192,17 +198,17 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
       onSubmit({
         message,
         currentMessageFiles,
-        deepResearch: deepResearchEnabled,
+        deepResearch: deepResearchEnabledForCurrentWorkflow,
       });
     }
   }
 
-  const { selectedAssistant, setSelectedAssistantFromId, liveAssistant } =
+  const { selectedAgent, setSelectedAgentFromId, liveAgent } =
     useAgentController({
       selectedChatSession: currentChatSession,
-      onAssistantSelect: () => {
-        // Only remove project context if user explicitly selected an assistant
-        // (i.e., assistantId is present). Avoid clearing project when assistantId was removed.
+      onAgentSelect: () => {
+        // Only remove project context if user explicitly selected an agent
+        // (i.e., agentId is present). Avoid clearing project when agentId was removed.
         const newSearchParams = new URLSearchParams(
           searchParams?.toString() || ""
         );
@@ -215,35 +221,32 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
 
   const { deepResearchEnabled, toggleDeepResearch } = useDeepResearchToggle({
     chatSessionId: currentChatSessionId,
-    assistantId: selectedAssistant?.id,
+    agentId: selectedAgent?.id,
   });
+  const deepResearchEnabledForCurrentWorkflow =
+    currentProjectId === null && deepResearchEnabled;
 
   const [presentingDocument, setPresentingDocument] =
     useState<MinimalOnyxDocument | null>(null);
 
-  const llmManager = useLlmManager(
-    currentChatSession ?? undefined,
-    liveAssistant
-  );
+  const llmManager = useLlmManager(currentChatSession ?? undefined, liveAgent);
 
   const {
     showOnboarding,
+    onboardingDismissed,
     onboardingState,
     onboardingActions,
-    llmDescriptors,
     isLoadingOnboarding,
     finishOnboarding,
     hideOnboarding,
   } = useShowOnboarding({
-    liveAssistant,
-    isLoadingProviders: llmManager.isLoadingProviders,
-    hasAnyProvider: llmManager.hasAnyProvider,
+    liveAgent,
     isLoadingChatSessions,
     chatSessionsCount: chatSessions.length,
     userId: user?.id,
   });
 
-  const noAssistants = liveAssistant === null || liveAssistant === undefined;
+  const noAgents = liveAgent === null || liveAgent === undefined;
 
   const availableSources: ValidSources[] = useMemo(() => {
     return ccPairs.map((ccPair) => ccPair.source);
@@ -292,7 +295,7 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
   const filterManager = useFilters();
 
   const isDefaultAgent = useIsDefaultAgent({
-    liveAssistant,
+    liveAgent,
     existingChatSessionId: currentChatSessionId,
     selectedChatSession: currentChatSession ?? undefined,
     settings,
@@ -358,6 +361,33 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
     (state) => state.updateCurrentDocumentSidebarVisible
   );
   const messageHistory = useCurrentMessageHistory();
+  const messageTree = useCurrentMessageTree();
+
+  // Block input when the last turn is multi-model and the user hasn't
+  // selected a preferred response yet. Without a selection, it's ambiguous
+  // which model's response should be used as context for the next message.
+  const awaitingPreferredSelection = useMemo(() => {
+    if (!messageTree || currentChatState !== "input") return false;
+    // Find the last user message in the history
+    const lastUserMsg = [...messageHistory]
+      .reverse()
+      .find((m) => m.type === "user");
+    if (!lastUserMsg) return false;
+    const childIds = lastUserMsg.childrenNodeIds ?? [];
+    if (childIds.length < 2) return false;
+    // Check if children are multi-model (have modelDisplayName)
+    const multiModelChildren = childIds
+      .map((id) => messageTree.get(id))
+      .filter(
+        (m) =>
+          m &&
+          (m.type === "assistant" || m.type === "error") &&
+          (m.modelDisplayName || m.overridden_model)
+      );
+    if (multiModelChildren.length < 2) return false;
+    // Check if a preferred response has been set on this user message
+    return lastUserMsg.preferredResponseId == null;
+  }, [messageHistory, messageTree, currentChatState]);
 
   // Determine anchor: second-to-last message (last user message before current response)
   const anchorMessage = messageHistory.at(-2) ?? messageHistory[0];
@@ -368,45 +398,89 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
   const autoScrollEnabled = user?.preferences?.auto_scroll !== false;
   const isStreaming = currentChatState === "streaming";
 
-  const { onSubmit, stopGenerating, handleMessageSpecificFileUpload } =
-    useChatController({
-      filterManager,
-      llmManager,
-      availableAssistants: agents,
-      liveAssistant,
-      existingChatSessionId: currentChatSessionId,
-      selectedDocuments,
-      searchParams,
-      resetInputBar,
-      setSelectedAssistantFromId,
-    });
+  const multiModel = useMultiModelChat(llmManager);
 
-  const { onMessageSelection, currentSessionFileTokenCount } =
-    useChatSessionController({
-      existingChatSessionId: currentChatSessionId,
-      searchParams,
-      filterManager,
-      firstMessage,
-      setSelectedAssistantFromId,
-      setSelectedDocuments,
-      setCurrentMessageFiles,
-      chatSessionIdRef,
-      loadedIdSessionRef,
-      chatInputBarRef,
-      isInitialLoad,
-      submitOnLoadPerformed,
-      refreshChatSessions,
-      onSubmit,
-    });
+  // Auto-fold sidebar when multi-model is active (panels need full width)
+  const { folded: sidebarFolded, setFolded: setSidebarFolded } =
+    useSidebarState();
+  const preMultiModelFoldedRef = useRef<boolean | null>(null);
+
+  useEffect(() => {
+    if (
+      multiModel.isMultiModelActive &&
+      preMultiModelFoldedRef.current === null
+    ) {
+      preMultiModelFoldedRef.current = sidebarFolded;
+      setSidebarFolded(true);
+    } else if (
+      !multiModel.isMultiModelActive &&
+      preMultiModelFoldedRef.current !== null
+    ) {
+      setSidebarFolded(preMultiModelFoldedRef.current);
+      preMultiModelFoldedRef.current = null;
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [multiModel.isMultiModelActive]);
+
+  // Sync single-model selection to llmManager so the submission path
+  // uses the correct provider/version (replaces the old LLMPopover sync).
+  useEffect(() => {
+    if (multiModel.selectedModels.length === 1) {
+      const model = multiModel.selectedModels[0]!;
+      llmManager.updateCurrentLlm({
+        name: model.name,
+        provider: model.provider,
+        modelName: model.modelName,
+      });
+    }
+  }, [multiModel.selectedModels]);
+
+  const {
+    onSubmit,
+    stopGenerating,
+    handleMessageSpecificFileUpload,
+    availableContextTokens,
+  } = useChatController({
+    filterManager,
+    llmManager,
+    availableAgents: agents,
+    liveAgent,
+    existingChatSessionId: currentChatSessionId,
+    selectedDocuments,
+    searchParams,
+    resetInputBar,
+    setSelectedAgentFromId,
+  });
+
+  const {
+    onMessageSelection,
+    currentSessionFileTokenCount,
+    sessionFetchError,
+  } = useChatSessionController({
+    existingChatSessionId: currentChatSessionId,
+    searchParams,
+    filterManager,
+    firstMessage,
+    setSelectedAgentFromId,
+    setSelectedDocuments,
+    setCurrentMessageFiles,
+    chatSessionIdRef,
+    loadedIdSessionRef,
+    chatInputBarRef,
+    isInitialLoad,
+    submitOnLoadPerformed,
+    refreshChatSessions,
+    onSubmit,
+  });
 
   useSendMessageToParent();
 
   const retrievalEnabled = useMemo(() => {
-    if (liveAssistant) {
-      return personaIncludesRetrieval(liveAssistant);
+    if (liveAgent) {
+      return personaIncludesRetrieval(liveAgent);
     }
     return false;
-  }, [liveAssistant]);
+  }, [liveAgent]);
 
   useEffect(() => {
     if (
@@ -418,10 +492,6 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
       updateCurrentDocumentSidebarVisible(false);
     }
   }, [currentChatSessionId]);
-
-  const [stackTraceModalContent, setStackTraceModalContent] = useState<
-    string | null
-  >(null);
 
   const handleResubmitLastMessage = useCallback(() => {
     // Grab the last user-type message
@@ -438,10 +508,15 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
     onSubmit({
       message: lastUserMsg.message,
       currentMessageFiles: currentMessageFiles,
-      deepResearch: deepResearchEnabled,
+      deepResearch: deepResearchEnabledForCurrentWorkflow,
       messageIdToResend: lastUserMsg.messageId,
     });
-  }, [messageHistory, onSubmit, currentMessageFiles, deepResearchEnabled]);
+  }, [
+    messageHistory,
+    onSubmit,
+    currentMessageFiles,
+    deepResearchEnabledForCurrentWorkflow,
+  ]);
 
   const toggleDocumentSidebar = useCallback(() => {
     if (!documentSidebarVisible) {
@@ -461,9 +536,12 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
       onSubmit({
         message,
         currentMessageFiles,
-        deepResearch: deepResearchEnabled,
+        deepResearch: deepResearchEnabledForCurrentWorkflow,
+        selectedModels: multiModel.isMultiModelActive
+          ? multiModel.selectedModels
+          : undefined,
       });
-      if (showOnboarding) {
+      if (showOnboarding || !onboardingDismissed) {
         finishOnboarding();
       }
     },
@@ -471,24 +549,31 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
       resetInputBar,
       onSubmit,
       currentMessageFiles,
-      deepResearchEnabled,
+      deepResearchEnabledForCurrentWorkflow,
+      multiModel.isMultiModelActive,
+      multiModel.selectedModels,
       showOnboarding,
+      onboardingDismissed,
       finishOnboarding,
     ]
   );
-  const { submit: submitQuery, classification } = useQueryController();
+  const { submit: submitQuery, state, setAppMode } = useQueryController();
 
   const defaultAppMode =
     (user?.preferences?.default_app_mode?.toLowerCase() as "chat" | "search") ??
     "chat";
 
+  const isNewSession = appFocus.isNewSession();
+
+  const isSearch =
+    state.phase === "searching" || state.phase === "search-results";
+
   // 1. Reset the app-mode back to the user's default when navigating back to the "New Sessions" tab.
   // 2. If we're navigating away from the "New Session" tab after performing a search, we reset the app-input-bar.
   useEffect(() => {
-    if (appFocus.isNewSession()) setAppMode(defaultAppMode);
-    if (!appFocus.isNewSession() && classification === "search")
-      resetInputBar();
-  }, [appFocus.isNewSession()]);
+    if (isNewSession) setAppMode(defaultAppMode);
+    if (!isNewSession && isSearch) resetInputBar();
+  }, [isNewSession, defaultAppMode, isSearch, resetInputBar, setAppMode]);
 
   const handleSearchDocumentClick = useCallback(
     (doc: MinimalOnyxDocument) => setPresentingDocument(doc),
@@ -504,9 +589,12 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
         onSubmit({
           message,
           currentMessageFiles,
-          deepResearch: deepResearchEnabled,
+          deepResearch: deepResearchEnabledForCurrentWorkflow,
+          selectedModels: multiModel.isMultiModelActive
+            ? multiModel.selectedModels
+            : undefined,
         });
-        if (showOnboarding) {
+        if (showOnboarding || !onboardingDismissed) {
           finishOnboarding();
         }
         return;
@@ -525,9 +613,12 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
       resetInputBar,
       onSubmit,
       currentMessageFiles,
-      deepResearchEnabled,
+      deepResearchEnabledForCurrentWorkflow,
       showOnboarding,
+      onboardingDismissed,
       finishOnboarding,
+      multiModel.isMultiModelActive,
+      multiModel.selectedModels,
     ]
   );
 
@@ -588,57 +679,14 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
     };
   }, [currentChatSessionId, currentProjectId, currentProjectDetails?.files]);
 
-  // Available context tokens source of truth:
-  // - If a chat session exists, fetch from session API (dynamic per session/model)
-  // - If no session, derive from the default/current persona's max document tokens
-  const [availableContextTokens, setAvailableContextTokens] = useState<number>(
-    DEFAULT_CONTEXT_TOKENS * 0.5
-  );
-  useEffect(() => {
-    let cancelled = false;
-    async function run() {
-      try {
-        if (currentChatSessionId) {
-          const available =
-            await getAvailableContextTokens(currentChatSessionId);
-          const capped_context_tokens =
-            (available ?? DEFAULT_CONTEXT_TOKENS) * 0.5;
-          if (!cancelled) setAvailableContextTokens(capped_context_tokens);
-        } else {
-          const personaId = (selectedAssistant || liveAssistant)?.id;
-          if (personaId !== undefined && personaId !== null) {
-            const maxTokens = await getMaxSelectedDocumentTokens(personaId);
-            const capped_context_tokens =
-              (maxTokens ?? DEFAULT_CONTEXT_TOKENS) * 0.5;
-            if (!cancelled) setAvailableContextTokens(capped_context_tokens);
-          } else if (!cancelled) {
-            setAvailableContextTokens(DEFAULT_CONTEXT_TOKENS * 0.5);
-          }
-        }
-      } catch (e) {
-        if (!cancelled) setAvailableContextTokens(DEFAULT_CONTEXT_TOKENS * 0.5);
-      }
-    }
-    run();
-    return () => {
-      cancelled = true;
-    };
-  }, [currentChatSessionId, selectedAssistant?.id, liveAssistant?.id]);
-
   // handle error case where no assistants are available
   // Only show this after agents have loaded to prevent flash during initial load
-  if (noAssistants && !isLoadingAgents) {
-    return (
-      <>
-        <HealthCheckBanner />
-        <NoAssistantModal />
-      </>
-    );
+  if (noAgents && !isLoadingAgents) {
+    return <NoAgentModal />;
   }
 
-  const hasStarterMessages = (liveAssistant?.starter_messages?.length ?? 0) > 0;
+  const hasStarterMessages = (liveAgent?.starter_messages?.length ?? 0) > 0;
 
-  const isSearch = classification === "search";
   const gridStyle = {
     gridTemplateColumns: "1fr",
     gridTemplateRows: isSearch
@@ -654,8 +702,6 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
 
   return (
     <>
-      <HealthCheckBanner />
-
       <AppPopup />
 
       {retrievalEnabled && documentSidebarVisible && settings.isMobile && (
@@ -686,23 +732,10 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
         </div>
       )}
 
-      {presentingDocument &&
-        (getCodeLanguage(presentingDocument.semantic_identifier || "") ? (
-          <CodeViewModal
-            presentingDocument={presentingDocument}
-            onClose={() => setPresentingDocument(null)}
-          />
-        ) : (
-          <TextViewModal
-            presentingDocument={presentingDocument}
-            onClose={() => setPresentingDocument(null)}
-          />
-        ))}
-
-      {stackTraceModalContent && (
-        <ExceptionTraceModal
-          onOutsideClick={() => setStackTraceModalContent(null)}
-          exceptionTrace={stackTraceModalContent}
+      {presentingDocument && (
+        <PreviewModal
+          presentingDocument={presentingDocument}
+          onClose={() => setPresentingDocument(null)}
         />
       )}
 
@@ -732,7 +765,8 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
                     show={
                       appFocus.isChat() &&
                       !!currentChatSessionId &&
-                      !!liveAssistant
+                      !!liveAgent &&
+                      !sessionFetchError
                     }
                     className="h-full w-full flex flex-col items-center"
                   >
@@ -745,9 +779,11 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
                       onScrollButtonVisibilityChange={setShowScrollButton}
                     >
                       <ChatUI
-                        liveAssistant={liveAssistant!}
+                        liveAgent={liveAgent!}
                         llmManager={llmManager}
-                        deepResearchEnabled={deepResearchEnabled}
+                        deepResearchEnabled={
+                          deepResearchEnabledForCurrentWorkflow
+                        }
                         currentMessageFiles={currentMessageFiles}
                         setPresentingDocument={setPresentingDocument}
                         onSubmit={onSubmit}
@@ -755,8 +791,48 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
                         stopGenerating={stopGenerating}
                         onResubmit={handleResubmitLastMessage}
                         anchorNodeId={anchorNodeId}
+                        selectedModels={multiModel.selectedModels}
                       />
                     </ChatScrollContainer>
+                  </Fade>
+
+                  {/* Session fetch error (404 / 403) */}
+                  <Fade
+                    show={appFocus.isChat() && sessionFetchError !== null}
+                    className="h-full w-full flex flex-col items-center justify-center"
+                  >
+                    {sessionFetchError && (
+                      <Section
+                        flexDirection="column"
+                        alignItems="center"
+                        gap={1}
+                      >
+                        <IllustrationContent
+                          illustration={
+                            sessionFetchError.type === "access_denied"
+                              ? SvgNoAccess
+                              : SvgNotFound
+                          }
+                          title={
+                            sessionFetchError.type === "not_found"
+                              ? "Chat not found"
+                              : sessionFetchError.type === "access_denied"
+                                ? "Access denied"
+                                : "Something went wrong"
+                          }
+                          description={
+                            sessionFetchError.type === "not_found"
+                              ? "This chat session doesn't exist or has been deleted."
+                              : sessionFetchError.type === "access_denied"
+                                ? "You don't have permission to view this chat session."
+                                : sessionFetchError.detail
+                          }
+                        />
+                        <Button href="/app" prominence="secondary">
+                          Start a new chat
+                        </Button>
+                      </Section>
+                    )}
                   </Fade>
 
                   {/* ProjectUI */}
@@ -774,20 +850,39 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
                   <Fade
                     show={
                       (appFocus.isNewSession() || appFocus.isAgent()) &&
-                      !classification
+                      (state.phase === "idle" || state.phase === "classifying")
                     }
                     className="w-full flex-1 flex flex-col items-center justify-end"
                   >
-                    <WelcomeMessage
-                      agent={liveAssistant}
-                      isDefaultAgent={isDefaultAgent}
-                    />
+                    <Section
+                      flexDirection="row"
+                      justifyContent="between"
+                      alignItems="end"
+                      className="max-w-[var(--app-page-main-content-width)]"
+                    >
+                      <WelcomeMessage
+                        agent={liveAgent}
+                        isDefaultAgent={isDefaultAgent}
+                      />
+                      <ModelSelector
+                        llmManager={llmManager}
+                        selectedModels={multiModel.selectedModels}
+                        onAdd={multiModel.addModel}
+                        onRemove={multiModel.removeModel}
+                        onReplace={multiModel.replaceModel}
+                      />
+                    </Section>
                     <Spacer rem={1.5} />
                   </Fade>
                 </div>
 
                 {/* ── Middle-center: AppInputBar ── */}
-                <div className="row-start-2 flex flex-col items-center">
+                <div
+                  className={cn(
+                    "row-start-2 flex flex-col items-center px-4",
+                    sessionFetchError && "hidden"
+                  )}
+                >
                   <div className="relative w-full max-w-[var(--app-page-main-content-width)] flex flex-col">
                     {/* Scroll to bottom button - positioned absolutely above AppInputBar */}
                     {appFocus.isChat() && showScrollButton && (
@@ -803,15 +898,16 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
 
                     {/* OnboardingUI */}
                     {(appFocus.isNewSession() || appFocus.isAgent()) &&
-                      !classification &&
-                      (showOnboarding || !user?.personalization?.name) && (
+                      (state.phase === "idle" ||
+                        state.phase === "classifying") &&
+                      (showOnboarding || !user?.personalization?.name) &&
+                      !onboardingDismissed && (
                         <OnboardingFlow
                           showOnboarding={showOnboarding}
                           handleHideOnboarding={hideOnboarding}
                           handleFinishOnboarding={finishOnboarding}
                           state={onboardingState}
                           actions={onboardingActions}
-                          llmDescriptors={llmDescriptors}
                         />
                       )}
 
@@ -837,19 +933,28 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
                       <div
                         className={cn(
                           "transition-all duration-150 ease-in-out overflow-hidden",
-                          classification === "search" ? "h-[14px]" : "h-0"
+                          isSearch ? "h-[14px]" : "h-0"
                         )}
                       />
+                      {appFocus.isChat() && (
+                        <div className="pb-1">
+                          <ModelSelector
+                            llmManager={llmManager}
+                            selectedModels={multiModel.selectedModels}
+                            onAdd={multiModel.addModel}
+                            onRemove={multiModel.removeModel}
+                            onReplace={multiModel.replaceModel}
+                          />
+                        </div>
+                      )}
                       <AppInputBar
                         ref={chatInputBarRef}
-                        deepResearchEnabled={deepResearchEnabled}
+                        deepResearchEnabled={
+                          deepResearchEnabledForCurrentWorkflow
+                        }
                         toggleDeepResearch={toggleDeepResearch}
-                        toggleDocumentSidebar={toggleDocumentSidebar}
                         filterManager={filterManager}
                         llmManager={llmManager}
-                        removeDocs={() => setSelectedDocuments([])}
-                        retrievalEnabled={retrievalEnabled}
-                        selectedDocuments={selectedDocuments}
                         initialMessage={
                           searchParams?.get(SEARCH_PARAM_NAMES.USER_PROMPT) ||
                           ""
@@ -863,12 +968,13 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
                             : projectContextTokenCount
                         }
                         availableContextTokens={availableContextTokens}
-                        selectedAssistant={selectedAssistant || liveAssistant}
+                        selectedAgent={selectedAgent || liveAgent}
                         handleFileUpload={handleMessageSpecificFileUpload}
                         setPresentingDocument={setPresentingDocument}
                         // Intentionally enabled during name-only onboarding (showOnboarding=false)
                         // since LLM providers are already configured and the user can chat.
                         disabled={
+                          awaitingPreferredSelection ||
                           (!llmManager.isLoadingProviders &&
                             llmManager.hasAnyProvider === false) ||
                           (showOnboarding &&
@@ -888,7 +994,16 @@ export default function AppPage({ firstMessage }: ChatPageProps) {
                 </div>
 
                 {/* ── Bottom: SearchResults + SourceFilter / Suggestions / ProjectChatList ── */}
-                <div className="row-start-3 min-h-0 overflow-hidden flex flex-col items-center w-full">
+                <div className="row-start-3 min-h-0 overflow-hidden flex flex-col items-center w-full px-4">
+                  {/* Agent description below input */}
+                  {(appFocus.isNewSession() || appFocus.isAgent()) &&
+                    !isDefaultAgent && (
+                      <>
+                        <Spacer rem={1} />
+                        <AgentDescription agent={liveAgent} />
+                        <Spacer rem={1.5} />
+                      </>
+                    )}
                   {/* ProjectChatSessionList */}
                   {appFocus.isProject() && (
                     <div className="w-full max-w-[var(--app-page-main-content-width)] h-full overflow-y-auto overscroll-y-none mx-auto">

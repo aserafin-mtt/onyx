@@ -1,5 +1,7 @@
 import { test, expect, Page } from "@playwright/test";
 import { loginAsRandomUser } from "../utils/auth";
+import * as fs from "fs";
+import * as path from "path";
 
 /**
  * Builds a newline-delimited JSON stream body matching the packet
@@ -143,14 +145,14 @@ test.describe("File preview modal from chat file links", () => {
     // Verify the file name is shown in the header
     await expect(modal.getByText("notes.txt")).toBeVisible();
 
-    // Verify the download button exists
-    await expect(modal.getByText("Download File")).toBeVisible();
+    // Verify the download link exists
+    await expect(modal.locator("a[download]")).toBeVisible();
 
     // Verify the file content is rendered
     await expect(modal.getByText("Hello from the mock file!")).toBeVisible();
   });
 
-  test("clicking a code file link opens the CodeViewModal with syntax highlighting", async ({
+  test("clicking a code file link opens the PreviewModal with syntax highlighting", async ({
     page,
   }) => {
     const mockContent = `Here is your script: [app.py](/api/chat/file/${MOCK_FILE_ID})`;
@@ -173,7 +175,7 @@ test.describe("File preview modal from chat file links", () => {
     await expect(fileLink).toBeVisible({ timeout: 5000 });
     await fileLink.click();
 
-    // Verify the CodeViewModal opens
+    // Verify the PreviewModal opens
     const modal = page.getByRole("dialog");
     await expect(modal).toBeVisible({ timeout: 5000 });
 
@@ -181,8 +183,18 @@ test.describe("File preview modal from chat file links", () => {
     await expect(modal.getByText("app.py")).toBeVisible();
 
     // Verify the header description shows language and line info
-    await expect(modal.getByText(/python/i)).toBeVisible();
-    await expect(modal.getByText("2 lines", { exact: true })).toBeVisible();
+    await expect(
+      modal
+        .locator("div")
+        .filter({ hasText: /python/i })
+        .first()
+    ).toBeVisible();
+    await expect(
+      modal
+        .locator("div")
+        .filter({ hasText: /2 lines/ })
+        .first()
+    ).toBeVisible();
 
     // Verify the code content is rendered
     await expect(modal.getByText("Hello, world!")).toBeVisible();
@@ -217,11 +229,103 @@ test.describe("File preview modal from chat file links", () => {
     const modal = page.getByRole("dialog");
     await expect(modal).toBeVisible({ timeout: 5000 });
 
-    // Click the download button and verify a download starts
+    // Click the download link and verify a download starts
     const downloadPromise = page.waitForEvent("download");
-    await modal.getByText("Download File").last().click();
+    await modal.locator("a[download]").last().click();
     const download = await downloadPromise;
 
     expect(download.suggestedFilename()).toContain("data.csv");
+  });
+
+  test("clicking a .docx file link opens the preview modal and renders content", async ({
+    page,
+  }) => {
+    const mockContent = `Here is your document: [report.docx](/api/chat/file/${MOCK_FILE_ID})`;
+
+    // Serve a real .docx fixture so docx-preview can parse it
+    const docxBuffer = fs.readFileSync(
+      path.join(__dirname, "../fixtures/three_images.docx")
+    );
+
+    await page.route(`**/api/chat/file/${MOCK_FILE_ID}`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType:
+          "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        body: docxBuffer,
+      });
+    });
+
+    await sendMessageWithMockResponse(
+      page,
+      "Give me the document",
+      mockContent
+    );
+
+    const aiMessage = page.getByTestId("onyx-ai-message").last();
+    const fileLink = aiMessage.locator("a").filter({ hasText: "report.docx" });
+    await expect(fileLink).toBeVisible({ timeout: 5000 });
+    await fileLink.click();
+
+    const modal = page.getByRole("dialog");
+    await expect(modal).toBeVisible({ timeout: 5000 });
+
+    // Verify the file name is shown in the header
+    await expect(modal.getByText("report.docx")).toBeVisible();
+
+    // Verify the header describes it as a Word Document
+    await expect(
+      modal
+        .locator("div")
+        .filter({ hasText: /Word Document/ })
+        .first()
+    ).toBeVisible();
+
+    // Verify docx-preview rendered content into the body container
+    await expect(modal.locator(".docx-host")).toBeVisible({ timeout: 10000 });
+
+    // Verify the download button exists
+    await expect(modal.locator("a[download]")).toBeVisible();
+  });
+
+  test("clicking a legacy .doc file link shows unsupported message", async ({
+    page,
+  }) => {
+    const mockContent = `Here is your document: [old_report.doc](/api/chat/file/${MOCK_FILE_ID})`;
+
+    await page.route(`**/api/chat/file/${MOCK_FILE_ID}`, async (route) => {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/msword",
+        body: "fake binary content",
+      });
+    });
+
+    await sendMessageWithMockResponse(
+      page,
+      "Give me the old document",
+      mockContent
+    );
+
+    const aiMessage = page.getByTestId("onyx-ai-message").last();
+    const fileLink = aiMessage
+      .locator("a")
+      .filter({ hasText: "old_report.doc" });
+    await expect(fileLink).toBeVisible({ timeout: 5000 });
+    await fileLink.click();
+
+    const modal = page.getByRole("dialog");
+    await expect(modal).toBeVisible({ timeout: 5000 });
+
+    // Verify the file name is shown
+    await expect(modal.getByText("old_report.doc")).toBeVisible();
+
+    // Verify the legacy .doc message is shown
+    await expect(
+      modal.getByText(/Legacy .doc format cannot be previewed/)
+    ).toBeVisible();
+
+    // Verify download button is still available
+    await expect(modal.locator("a[download]")).toBeVisible();
   });
 });

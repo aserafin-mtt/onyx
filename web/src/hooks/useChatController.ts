@@ -2,9 +2,12 @@
 
 import {
   buildChatUrl,
+  getAvailableContextTokens,
   nameChatSession,
   updateLlmOverrideForChatSession,
 } from "@/app/app/services/lib";
+import { getMaxSelectedDocumentTokens } from "@/app/app/projects/projectsService";
+import { DEFAULT_CONTEXT_TOKENS } from "@/lib/constants";
 import { StreamStopInfo } from "@/lib/search/interfaces";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { Route } from "next";
@@ -17,7 +20,7 @@ import {
   buildImmediateMessages,
   buildEmptyMessage,
 } from "@/app/app/services/messageTree";
-import { MinimalPersonaSnapshot } from "@/app/admin/assistants/interfaces";
+import { MinimalPersonaSnapshot } from "@/app/admin/agents/interfaces";
 import { SEARCH_PARAM_NAMES } from "@/app/app/services/searchParams";
 import { SEARCH_TOOL_ID } from "@/app/app/components/tools/constants";
 import { OnyxDocument } from "@/lib/search/interfaces";
@@ -30,6 +33,7 @@ import {
   FileDescriptor,
   Message,
   MessageResponseIDInfo,
+  MultiModelMessageResponseIDInfo,
   RegenerationState,
   RetrievalType,
   StreamingError,
@@ -42,7 +46,7 @@ import {
   getFinalLLM,
   modelSupportsImageInput,
   structureValue,
-} from "@/lib/llm/utils";
+} from "@/lib/llmConfig/utils";
 import {
   CurrentMessageFIFO,
   updateCurrentMessageFIFO,
@@ -55,7 +59,7 @@ import {
   useRouter,
   useSearchParams,
 } from "next/navigation";
-import { usePostHog } from "posthog-js/react";
+import { track, AnalyticsEvent } from "@/lib/analytics";
 import { getExtensionContext } from "@/lib/extension/utils";
 import useChatSessions from "@/hooks/useChatSessions";
 import { usePinnedAgents } from "@/hooks/useAgents";
@@ -66,6 +70,7 @@ import {
   useCurrentMessageHistory,
 } from "@/app/app/stores/useChatSessionStore";
 import { Packet, MessageStart } from "@/app/app/services/streamingModels";
+import { SelectedModel } from "@/refresh-components/popovers/ModelSelector";
 import useAgentPreferences from "@/hooks/useAgentPreferences";
 import { useForcedTools } from "@/lib/hooks/useForcedTools";
 import { ProjectFile, useProjectsContext } from "@/providers/ProjectsContext";
@@ -89,6 +94,10 @@ export interface OnSubmitProps {
   isSeededChat?: boolean;
   modelOverride?: LlmDescriptor;
   regenerationRequest?: RegenerationRequest | null;
+  // Additional context injected into the LLM call but not stored/shown in chat.
+  additionalContext?: string;
+  /** When 2+ models, triggers multi-model parallel generation via backend. */
+  selectedModels?: SelectedModel[];
 }
 
 interface RegenerationRequest {
@@ -100,13 +109,13 @@ interface RegenerationRequest {
 interface UseChatControllerProps {
   filterManager: FilterManager;
   llmManager: LlmManager;
-  liveAssistant: MinimalPersonaSnapshot | undefined;
-  availableAssistants: MinimalPersonaSnapshot[];
+  liveAgent: MinimalPersonaSnapshot | undefined;
+  availableAgents: MinimalPersonaSnapshot[];
   existingChatSessionId: string | null;
   selectedDocuments: OnyxDocument[];
   searchParams: ReadonlyURLSearchParams;
   resetInputBar: () => void;
-  setSelectedAssistantFromId: (assistantId: number | null) => void;
+  setSelectedAgentFromId: (agentId: number | null) => void;
 }
 
 async function stopChatSession(chatSessionId: string): Promise<void> {
@@ -125,12 +134,12 @@ async function stopChatSession(chatSessionId: string): Promise<void> {
 export default function useChatController({
   filterManager,
   llmManager,
-  availableAssistants,
-  liveAssistant,
+  availableAgents,
+  liveAgent,
   existingChatSessionId,
   selectedDocuments,
   resetInputBar,
-  setSelectedAssistantFromId,
+  setSelectedAgentFromId,
 }: UseChatControllerProps) {
   const pathname = usePathname();
   const router = useRouter();
@@ -138,11 +147,10 @@ export default function useChatController({
   const params = useAppParams();
   const { refreshChatSessions, addPendingChatSession } = useChatSessions();
   const { pinnedAgents, togglePinnedAgent } = usePinnedAgents();
-  const { assistantPreferences } = useAgentPreferences();
+  const { agentPreferences } = useAgentPreferences();
   const { forcedToolIds } = useForcedTools();
   const { fetchProjects, setCurrentMessageFiles, beginUpload } =
     useProjectsContext();
-  const posthog = usePostHog();
 
   // Use selectors to access only the specific fields we need
   const currentSessionId = useChatSessionStore(
@@ -191,9 +199,6 @@ export default function useChatController({
   const currentChatState = useCurrentChatState();
 
   const navigatingAway = useRef(false);
-
-  // Local state that doesn't need to be in the store
-  const [_maxTokens, setMaxTokens] = useState<number>(4096);
 
   // Sync store state changes
   useEffect(() => {
@@ -368,7 +373,11 @@ export default function useChatController({
       isSeededChat,
       modelOverride,
       regenerationRequest,
+      additionalContext,
+      selectedModels,
     }: OnSubmitProps) => {
+      const isMultiModel =
+        !regenerationRequest && (selectedModels?.length ?? 0) >= 2;
       const projectId = params(SEARCH_PARAM_NAMES.PROJECT_ID);
       {
         const params = new URLSearchParams(searchParams?.toString() || "");
@@ -459,12 +468,12 @@ export default function useChatController({
       }
 
       // Auto-pin the agent to sidebar when sending a message if not already pinned
-      if (liveAssistant) {
+      if (liveAgent) {
         const isAlreadyPinned = pinnedAgents.some(
-          (agent) => agent.id === liveAssistant.id
+          (agent) => agent.id === liveAgent.id
         );
         if (!isAlreadyPinned) {
-          togglePinnedAgent(liveAssistant, true).catch((err) => {
+          togglePinnedAgent(liveAgent, true).catch((err) => {
             console.error("Failed to auto-pin agent:", err);
           });
         }
@@ -478,14 +487,14 @@ export default function useChatController({
 
       const searchParamBasedChatSessionName =
         searchParams?.get(SEARCH_PARAM_NAMES.TITLE) || null;
-      // Auto-name only once, after the first assistant response, and only when the chat isn't
+      // Auto-name only once, after the first agent response, and only when the chat isn't
       // already explicitly named (e.g. `?title=...`).
       const hadAnyUserMessagesBeforeSubmit = currentHistory.some(
         (m) => m.type === "user"
       );
       if (isNewSession) {
         currChatSessionId = await createChatSession(
-          liveAssistant?.id || 0,
+          liveAgent?.id || 0,
           searchParamBasedChatSessionName,
           projectId ? parseInt(projectId) : null
         );
@@ -494,7 +503,7 @@ export default function useChatController({
         // This ensures "New Chat" appears immediately, even before any messages are saved
         addPendingChatSession({
           chatSessionId: currChatSessionId,
-          personaId: liveAssistant?.id || 0,
+          personaId: liveAgent?.id || 0,
           projectId: projectId ? parseInt(projectId) : null,
         });
       } else {
@@ -598,12 +607,13 @@ export default function useChatController({
       // Add user message immediately to the message tree so that the chat
       // immediately reflects the user message
       let initialUserNode: Message;
-      let initialAssistantNode: Message;
+      let initialAgentNode: Message;
+      let initialAssistantNodes: Message[] = [];
 
       if (regenerationRequest) {
-        // For regeneration: keep the existing user message, only create new assistant
+        // For regeneration: keep the existing user message, only create new agent
         initialUserNode = regenerationRequest.parentMessage;
-        initialAssistantNode = buildEmptyMessage({
+        initialAgentNode = buildEmptyMessage({
           messageType: "assistant",
           parentNodeId: initialUserNode.nodeId,
           nodeIdOffset: 1,
@@ -620,13 +630,34 @@ export default function useChatController({
           messageToResend
         );
         initialUserNode = result.initialUserNode;
-        initialAssistantNode = result.initialAssistantNode;
+        initialAgentNode = result.initialAgentNode;
+
+        // In multi-model mode, create N assistant placeholder nodes (one per model).
+        // Set modelDisplayName/overridden_model immediately so ChatUI detects
+        // multi-model from the first render (before any packets arrive).
+        if (isMultiModel && selectedModels) {
+          initialAssistantNodes = selectedModels.map((model, i) => {
+            const node = buildEmptyMessage({
+              messageType: "assistant",
+              parentNodeId: initialUserNode.nodeId,
+              nodeIdOffset: i + 1,
+            });
+            node.modelDisplayName = model.displayName;
+            node.overridden_model = model.modelName;
+            return node;
+          });
+        }
       }
 
       // make messages appear + clear input bar
-      const messagesToUpsert = regenerationRequest
-        ? [initialAssistantNode] // Only upsert the new assistant for regeneration
-        : [initialUserNode, initialAssistantNode]; // Upsert both for normal/edit flow
+      let messagesToUpsert: Message[];
+      if (regenerationRequest) {
+        messagesToUpsert = [initialAgentNode];
+      } else if (isMultiModel) {
+        messagesToUpsert = [initialUserNode, ...initialAssistantNodes];
+      } else {
+        messagesToUpsert = [initialUserNode, initialAgentNode];
+      }
       currentMessageTreeLocal = upsertToCompleteMessageTree({
         messages: messagesToUpsert,
         completeMessageTreeOverride: currentMessageTreeLocal,
@@ -658,18 +689,79 @@ export default function useChatController({
       let packetsVersion = 0;
 
       let newUserMessageId: number | null = null;
-      let newAssistantMessageId: number | null = null;
+      let newAgentMessageId: number | null = null;
+
+      // Multi-model per-model state (indexed by model_index from backend)
+      const numModels = selectedModels?.length ?? 0;
+      const assistantMessageIds: (number | null)[] = isMultiModel
+        ? Array(numModels).fill(null)
+        : [];
+      const packetsPerModel: Packet[][] = isMultiModel
+        ? Array.from({ length: numModels }, () => [])
+        : [];
+      const documentsPerModel: OnyxDocument[][] = isMultiModel
+        ? Array.from({ length: numModels }, () => [])
+        : [];
+      const citationsPerModel: (CitationMap | null)[] = isMultiModel
+        ? Array(numModels).fill(null)
+        : [];
+      // Track which models have errored so the bottom-of-loop upsert skips them
+      const erroredModelIndices = new Set<number>();
+      let modelDisplayNames: string[] = isMultiModel
+        ? selectedModels?.map((m) => m.displayName) ?? []
+        : [];
+
+      /** Build a non-errored multi-model assistant node for upsert. */
+      function buildAssistantNodeUpdate(
+        idx: number,
+        overrides?: Partial<Message>
+      ): Message {
+        return {
+          ...initialAssistantNodes[idx]!,
+          messageId: assistantMessageIds[idx] ?? undefined,
+          message: "",
+          type: "assistant" as const,
+          retrievalType,
+          query,
+          documents: documentsPerModel[idx] || [],
+          citations: citationsPerModel[idx] || {},
+          files: [] as FileDescriptor[],
+          toolCall: null,
+          stackTrace: null,
+          overridden_model: selectedModels?.[idx]?.modelName,
+          modelDisplayName:
+            modelDisplayNames[idx] ||
+            selectedModels?.[idx]?.displayName ||
+            null,
+          stopReason,
+          packets: packetsPerModel[idx] || [],
+          packetCount: packetsPerModel[idx]?.length || 0,
+          ...overrides,
+        };
+      }
+
+      /** Build updated nodes for all non-errored models. */
+      function buildNonErroredNodes(overrides?: Partial<Message>): Message[] {
+        const nodes: Message[] = [];
+        for (let idx = 0; idx < initialAssistantNodes.length; idx++) {
+          if (erroredModelIndices.has(idx)) continue;
+          nodes.push(buildAssistantNodeUpdate(idx, overrides));
+        }
+        return nodes;
+      }
+
+      let streamSucceeded = false;
 
       try {
         const lastSuccessfulMessageId = getLastSuccessfulMessageId(
           currentMessageTreeLocal
         );
-        const disabledToolIds = liveAssistant
-          ? assistantPreferences?.[liveAssistant?.id]?.disabled_tool_ids
+        const disabledToolIds = liveAgent
+          ? agentPreferences?.[liveAgent?.id]?.disabled_tool_ids
           : undefined;
 
         // Find the search tool's numeric ID for forceSearch
-        const searchToolNumericId = liveAssistant?.tools.find(
+        const searchToolNumericId = liveAgent?.tools.find(
           (tool) => tool.in_code_tool_id === SEARCH_TOOL_ID
         )?.id;
 
@@ -708,23 +800,33 @@ export default function useChatController({
             filterManager.timeRange,
             filterManager.selectedTags
           ),
-          modelProvider:
-            modelOverride?.name || llmManager.currentLlm.name || undefined,
-          modelVersion:
-            modelOverride?.modelName ||
-            llmManager.currentLlm.modelName ||
-            searchParams?.get(SEARCH_PARAM_NAMES.MODEL_VERSION) ||
-            undefined,
+          modelProvider: isMultiModel
+            ? undefined
+            : modelOverride?.name || llmManager.currentLlm.name || undefined,
+          modelVersion: isMultiModel
+            ? undefined
+            : modelOverride?.modelName ||
+              llmManager.currentLlm.modelName ||
+              searchParams?.get(SEARCH_PARAM_NAMES.MODEL_VERSION) ||
+              undefined,
           temperature: llmManager.temperature || undefined,
           deepResearch,
           enabledToolIds:
-            disabledToolIds && liveAssistant
-              ? liveAssistant.tools
+            disabledToolIds && liveAgent
+              ? liveAgent.tools
                   .filter((tool) => !disabledToolIds?.includes(tool.id))
                   .map((tool) => tool.id)
               : undefined,
           forcedToolId: effectiveForcedToolId,
           origin: messageOrigin,
+          additionalContext,
+          llmOverrides: isMultiModel
+            ? selectedModels!.map((m) => ({
+                model_provider: m.name,
+                model_version: m.modelName,
+                display_name: m.displayName,
+              }))
+            : undefined,
         });
 
         const delay = (ms: number) => {
@@ -760,10 +862,10 @@ export default function useChatController({
                 .user_message_id;
 
               // Track extension queries in PostHog (reuses isExtension/extensionContext from above)
-              if (isExtension && posthog) {
-                posthog.capture("extension_chat_query", {
+              if (isExtension) {
+                track(AnalyticsEvent.EXTENSION_CHAT_QUERY, {
                   extension_context: extensionContext,
-                  assistant_id: liveAssistant?.id,
+                  assistant_id: liveAgent?.id,
                   has_files: effectiveFileDescriptors.length > 0,
                   deep_research: deepResearch,
                 });
@@ -773,8 +875,30 @@ export default function useChatController({
             if (
               (packet as MessageResponseIDInfo).reserved_assistant_message_id
             ) {
-              newAssistantMessageId = (packet as MessageResponseIDInfo)
+              newAgentMessageId = (packet as MessageResponseIDInfo)
                 .reserved_assistant_message_id;
+            }
+
+            // Multi-model: handle reserved IDs for N parallel model responses.
+            // This packet is metadata-only — skip the content-processing chain below.
+            if (
+              isMultiModel &&
+              Object.hasOwn(packet, "responses") &&
+              Array.isArray(
+                (packet as MultiModelMessageResponseIDInfo).responses
+              )
+            ) {
+              const multiPacket = packet as MultiModelMessageResponseIDInfo;
+              newUserMessageId =
+                multiPacket.user_message_id ?? newUserMessageId;
+              for (let mi = 0; mi < multiPacket.responses.length; mi++) {
+                const slot = multiPacket.responses[mi]!;
+                assistantMessageIds[mi] = slot.message_id;
+                if (slot.model_name) {
+                  modelDisplayNames[mi] = slot.model_name;
+                }
+              }
+              continue;
             }
 
             if (Object.hasOwn(packet, "user_files")) {
@@ -801,17 +925,61 @@ export default function useChatController({
               (packet as any).error != null
             ) {
               const streamingError = packet as StreamingError;
-              error = streamingError.error;
-              stackTrace = streamingError.stack_trace || null;
-              errorCode = streamingError.error_code || null;
-              isRetryable = streamingError.is_retryable ?? true;
-              errorDetails = streamingError.details || null;
 
-              setUncaughtError(frozenSessionId, streamingError.error);
-              updateChatStateAction(frozenSessionId, "input");
-              updateSubmittedMessage(getCurrentSessionId(), "");
+              // In multi-model mode, route per-model errors to the specific model's
+              // node instead of killing the entire stream. Other models keep streaming.
+              if (isMultiModel && streamingError.details?.model_index != null) {
+                const errorModelIndex = streamingError.details
+                  .model_index as number;
+                if (
+                  errorModelIndex >= 0 &&
+                  errorModelIndex < initialAssistantNodes.length
+                ) {
+                  const errorNode = initialAssistantNodes[errorModelIndex]!;
+                  erroredModelIndices.add(errorModelIndex);
+                  currentMessageTreeLocal = upsertToCompleteMessageTree({
+                    messages: [
+                      {
+                        ...errorNode,
+                        messageId:
+                          assistantMessageIds[errorModelIndex] ?? undefined,
+                        message: streamingError.error,
+                        type: "error",
+                        stackTrace: streamingError.stack_trace || null,
+                        errorCode: streamingError.error_code || null,
+                        isRetryable: streamingError.is_retryable ?? true,
+                        errorDetails: streamingError.details || null,
+                        overridden_model:
+                          selectedModels?.[errorModelIndex]?.modelName,
+                        modelDisplayName:
+                          modelDisplayNames[errorModelIndex] ||
+                          selectedModels?.[errorModelIndex]?.displayName ||
+                          null,
+                        packets: [],
+                        packetCount: 0,
+                        is_generating: false,
+                      },
+                    ],
+                    completeMessageTreeOverride: currentMessageTreeLocal,
+                    chatSessionId: frozenSessionId!,
+                  });
+                }
+                // Skip the normal per-packet upsert — we already upserted the error node
+                continue;
+              } else {
+                // Single-model: kill the stream
+                error = streamingError.error;
+                stackTrace = streamingError.stack_trace || null;
+                errorCode = streamingError.error_code || null;
+                isRetryable = streamingError.is_retryable ?? true;
+                errorDetails = streamingError.details || null;
 
-              throw new Error(streamingError.error);
+                setUncaughtError(frozenSessionId, streamingError.error);
+                updateChatStateAction(frozenSessionId, "input");
+                updateSubmittedMessage(getCurrentSessionId(), "");
+
+                throw new Error(streamingError.error);
+              }
             } else if (Object.hasOwn(packet, "message_id")) {
               finalMessage = packet as BackendMessage;
             } else if (Object.hasOwn(packet, "stop_reason")) {
@@ -820,32 +988,86 @@ export default function useChatController({
                 updateCanContinue(true, frozenSessionId);
               }
             } else if (Object.hasOwn(packet, "obj")) {
-              packets.push(packet as Packet);
-              packetsVersion++;
+              const typedPacket = packet as Packet;
+              const packetObj = typedPacket.obj;
 
-              // Check if the packet contains document information
-              const packetObj = (packet as Packet).obj;
+              if (isMultiModel) {
+                // Multi-model: route packet by placement.model_index.
+                // OverallStop (type "stop") has model_index=null — it's a global
+                // terminal packet that must be delivered to ALL models so each
+                // panel's AgentMessage sees the stop and exits "Thinking..." state.
+                const isGlobalStop =
+                  packetObj.type === "stop" &&
+                  typedPacket.placement?.model_index == null;
 
-              if (packetObj.type === "citation_info") {
-                // Individual citation packet from backend streaming
-                const citationInfo = packetObj as {
-                  type: "citation_info";
-                  citation_number: number;
-                  document_id: string;
-                };
-                // Incrementally build citations map
-                citations = {
-                  ...(citations || {}),
-                  [citationInfo.citation_number]: citationInfo.document_id,
-                };
-              } else if (packetObj.type === "message_start") {
-                const messageStart = packetObj as MessageStart;
-                if (messageStart.final_documents) {
-                  documents = messageStart.final_documents;
-                  updateSelectedNodeForDocDisplay(
-                    frozenSessionId,
-                    initialAssistantNode.nodeId
-                  );
+                if (isGlobalStop) {
+                  for (let mi = 0; mi < packetsPerModel.length; mi++) {
+                    packetsPerModel[mi] = [
+                      ...packetsPerModel[mi]!,
+                      typedPacket,
+                    ];
+                  }
+                }
+
+                const modelIndex = typedPacket.placement?.model_index ?? 0;
+                if (
+                  !isGlobalStop &&
+                  modelIndex >= 0 &&
+                  modelIndex < packetsPerModel.length
+                ) {
+                  packetsPerModel[modelIndex] = [
+                    ...packetsPerModel[modelIndex]!,
+                    typedPacket,
+                  ];
+
+                  if (packetObj.type === "citation_info") {
+                    const citationInfo = packetObj as {
+                      type: "citation_info";
+                      citation_number: number;
+                      document_id: string;
+                    };
+                    citationsPerModel[modelIndex] = {
+                      ...(citationsPerModel[modelIndex] || {}),
+                      [citationInfo.citation_number]: citationInfo.document_id,
+                    };
+                  } else if (packetObj.type === "message_start") {
+                    const messageStart = packetObj as MessageStart;
+                    if (messageStart.final_documents) {
+                      documentsPerModel[modelIndex] =
+                        messageStart.final_documents;
+                      if (modelIndex === 0 && initialAssistantNodes[0]) {
+                        updateSelectedNodeForDocDisplay(
+                          frozenSessionId,
+                          initialAssistantNodes[0].nodeId
+                        );
+                      }
+                    }
+                  }
+                }
+              } else {
+                // Single-model
+                packets.push(typedPacket);
+                packetsVersion++;
+
+                if (packetObj.type === "citation_info") {
+                  const citationInfo = packetObj as {
+                    type: "citation_info";
+                    citation_number: number;
+                    document_id: string;
+                  };
+                  citations = {
+                    ...(citations || {}),
+                    [citationInfo.citation_number]: citationInfo.document_id,
+                  };
+                } else if (packetObj.type === "message_start") {
+                  const messageStart = packetObj as MessageStart;
+                  if (messageStart.final_documents) {
+                    documents = messageStart.final_documents;
+                    updateSelectedNodeForDocDisplay(
+                      frozenSessionId,
+                      initialAgentNode.nodeId
+                    );
+                  }
                 }
               }
             } else {
@@ -857,16 +1079,34 @@ export default function useChatController({
             parentMessage =
               parentMessage || currentMessageTreeLocal?.get(SYSTEM_NODE_ID)!;
 
-            currentMessageTreeLocal = upsertToCompleteMessageTree({
-              messages: [
+            // Build the messages to upsert based on single vs multi-model mode
+            let messagesToUpsertInLoop: Message[];
+
+            if (isMultiModel) {
+              // Read the current user node from the tree to preserve childrenNodeIds
+              // (initialUserNode has stale/empty children from creation time).
+              const currentUserNode =
+                currentMessageTreeLocal.get(initialUserNode.nodeId) ||
+                initialUserNode;
+              const updatedUserNode: Message = {
+                ...currentUserNode,
+                messageId: newUserMessageId ?? undefined,
+                files: files,
+              };
+              messagesToUpsertInLoop = [
+                updatedUserNode,
+                ...buildNonErroredNodes(),
+              ];
+            } else {
+              messagesToUpsertInLoop = [
                 {
                   ...initialUserNode,
                   messageId: newUserMessageId ?? undefined,
                   files: files,
                 },
                 {
-                  ...initialAssistantNode,
-                  messageId: newAssistantMessageId ?? undefined,
+                  ...initialAgentNode,
+                  messageId: newAgentMessageId ?? undefined,
                   message: error || answer,
                   type: error ? "error" : "assistant",
                   retrievalType,
@@ -891,45 +1131,82 @@ export default function useChatController({
                         : undefined;
                     })(),
                 },
-              ],
-              // Pass the latest map state
+              ];
+            }
+
+            currentMessageTreeLocal = upsertToCompleteMessageTree({
+              messages: messagesToUpsertInLoop,
               completeMessageTreeOverride: currentMessageTreeLocal,
               chatSessionId: frozenSessionId!,
             });
           }
         }
+        // Surface FIFO errors (e.g. 429 before any packets arrive) so the
+        // catch block replaces the thinking placeholder with an error message.
+        if (stack.error) {
+          throw new Error(stack.error);
+        }
+        streamSucceeded = true;
       } catch (e: any) {
         console.log("Error:", e);
         const errorMsg = e.message;
-        currentMessageTreeLocal = upsertToCompleteMessageTree({
-          messages: [
-            {
-              nodeId: initialUserNode.nodeId,
-              message: currMessage,
-              type: "user",
-              files: effectiveFileDescriptors,
-              toolCall: null,
-              parentNodeId: parentMessage?.nodeId || SYSTEM_NODE_ID,
-              packets: [],
-              packetCount: 0,
-            },
-            {
-              nodeId: initialAssistantNode.nodeId,
+        const userErrorNode: Message = {
+          nodeId: initialUserNode.nodeId,
+          message: currMessage,
+          type: "user",
+          files: effectiveFileDescriptors,
+          toolCall: null,
+          parentNodeId: parentMessage?.nodeId || SYSTEM_NODE_ID,
+          packets: [],
+          packetCount: 0,
+        };
+
+        // In multi-model mode, mark non-errored assistant nodes as errors.
+        // Skip models that already have their own per-model error state.
+        // In single-model mode, mark the one agent node.
+        const errorAssistantNodes: Message[] = isMultiModel
+          ? buildNonErroredNodes({
               message: errorMsg,
-              type: "error",
-              files: aiMessageImages || [],
-              toolCall: null,
-              parentNodeId: initialUserNode.nodeId,
+              type: "error" as const,
               packets: [],
               packetCount: 0,
-              stackTrace: stackTrace,
-              errorCode: errorCode,
-              isRetryable: isRetryable,
-              errorDetails: errorDetails,
-            },
-          ],
+              stackTrace,
+              errorCode,
+              isRetryable,
+              errorDetails,
+            })
+          : [
+              {
+                nodeId: initialAgentNode.nodeId,
+                message: errorMsg,
+                type: "error" as const,
+                files: aiMessageImages || [],
+                toolCall: null,
+                parentNodeId: initialUserNode.nodeId,
+                packets: [],
+                packetCount: 0,
+                stackTrace: stackTrace,
+                errorCode: errorCode,
+                isRetryable: isRetryable,
+                errorDetails: errorDetails,
+              },
+            ];
+
+        currentMessageTreeLocal = upsertToCompleteMessageTree({
+          messages: [userErrorNode, ...errorAssistantNodes],
           completeMessageTreeOverride: currentMessageTreeLocal,
           chatSessionId: frozenSessionId,
+        });
+      }
+
+      // After streaming completes (normal or stop), mark all non-errored
+      // multi-model assistant nodes as done generating so panels exit
+      // "Thinking..." state.
+      if (isMultiModel && initialAssistantNodes.length > 0 && streamSucceeded) {
+        upsertToCompleteMessageTree({
+          messages: buildNonErroredNodes({ is_generating: false }),
+          completeMessageTreeOverride: currentMessageTreeLocal,
+          chatSessionId: frozenSessionId!,
         });
       }
 
@@ -951,20 +1228,20 @@ export default function useChatController({
       llmManager.currentLlm,
       llmManager.temperature,
       // Others that affect logic
-      liveAssistant,
-      availableAssistants,
+      liveAgent,
+      availableAgents,
       existingChatSessionId,
       selectedDocuments,
       searchParams,
       resetInputBar,
-      setSelectedAssistantFromId,
+      setSelectedAgentFromId,
       updateSelectedNodeForDocDisplay,
       currentMessageTree,
       currentChatState,
       // Ensure latest forced tools are used when submitting
       forcedToolIds,
       // Keep tool preference-derived values fresh
-      assistantPreferences,
+      agentPreferences,
       fetchProjects,
       // For auto-pinning agents
       pinnedAgents,
@@ -976,7 +1253,7 @@ export default function useChatController({
     async (acceptedFiles: File[]) => {
       const [_, llmModel] = getFinalLLM(
         llmManager.llmProviders || [],
-        liveAssistant || null,
+        liveAgent || null,
         llmManager.currentLlm
       );
       const llmAcceptsImages = modelSupportsImageInput(
@@ -1002,7 +1279,7 @@ export default function useChatController({
       setCurrentMessageFiles((prev) => [...prev, ...uploadedMessageFiles]);
       updateChatStateAction(getCurrentSessionId(), "input");
     },
-    [liveAssistant, llmManager, forcedToolIds]
+    [liveAgent, llmManager, forcedToolIds]
   );
 
   useEffect(() => {
@@ -1021,13 +1298,9 @@ export default function useChatController({
   useEffect(() => {
     if (currentMessageHistory.length === 0 && existingChatSessionId === null) {
       // Select from available assistants so shared assistants appear.
-      setSelectedAssistantFromId(null);
+      setSelectedAgentFromId(null);
     }
-  }, [
-    existingChatSessionId,
-    availableAssistants,
-    currentMessageHistory.length,
-  ]);
+  }, [existingChatSessionId, availableAgents, currentMessageHistory.length]);
 
   useEffect(() => {
     const handleSlackChatRedirect = async () => {
@@ -1067,21 +1340,59 @@ export default function useChatController({
     handleSlackChatRedirect();
   }, [searchParams, router]);
 
-  // fetch # of allowed document tokens for the selected Persona
-  useEffect(() => {
-    if (!liveAssistant?.id) return; // avoid calling with undefined persona id
+  // Available context tokens: if a chat session exists, fetch from the session
+  // API (dynamic per session/model). Otherwise derive from the persona's max
+  // document tokens. The backend already accounts for system prompt, tools,
+  // and user-message reservations.
+  const [availableContextTokens, setAvailableContextTokens] = useState<number>(
+    DEFAULT_CONTEXT_TOKENS
+  );
 
-    async function fetchMaxTokens() {
-      const response = await fetch(
-        `/api/chat/max-selected-document-tokens?persona_id=${liveAssistant?.id}`
-      );
-      if (response.ok) {
-        const maxTokens = (await response.json()).max_tokens as number;
-        setMaxTokens(maxTokens);
+  useEffect(() => {
+    if (!llmManager.hasAnyProvider) return;
+
+    let cancelled = false;
+
+    const setIfActive = (tokens: number) => {
+      if (!cancelled) setAvailableContextTokens(tokens);
+    };
+
+    // Prefer the Zustand session ID, but fall back to the URL-derived prop
+    // so we don't incorrectly take the persona path while the store is
+    // still initialising on navigation to an existing chat.
+    const sessionId = currentSessionId || existingChatSessionId;
+
+    (async () => {
+      try {
+        if (sessionId) {
+          const available = await getAvailableContextTokens(sessionId);
+          setIfActive(available ?? DEFAULT_CONTEXT_TOKENS);
+          return;
+        }
+
+        const personaId = liveAgent?.id;
+        if (personaId == null) {
+          setIfActive(DEFAULT_CONTEXT_TOKENS);
+          return;
+        }
+
+        const maxTokens = await getMaxSelectedDocumentTokens(personaId);
+        setIfActive(maxTokens ?? DEFAULT_CONTEXT_TOKENS);
+      } catch (e) {
+        console.error("Failed to fetch available context tokens:", e);
+        setIfActive(DEFAULT_CONTEXT_TOKENS);
       }
-    }
-    fetchMaxTokens();
-  }, [liveAssistant]);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    currentSessionId,
+    existingChatSessionId,
+    liveAgent?.id,
+    llmManager.hasAnyProvider,
+  ]);
 
   // check if there's an image file in the message history so that we know
   // which LLMs are available to use
@@ -1110,5 +1421,7 @@ export default function useChatController({
     onSubmit,
     stopGenerating,
     handleMessageSpecificFileUpload,
+    // data
+    availableContextTokens,
   };
 }

@@ -1,8 +1,8 @@
 "use client";
 
-import { AdminPageTitle } from "@/components/admin/Title";
 import SimpleTabs from "@/refresh-components/SimpleTabs";
-import Text from "@/components/ui/text";
+import * as SettingsLayouts from "@/layouts/settings-layouts";
+import { Text } from "@opal/components";
 import { useState } from "react";
 import {
   insertGlobalTokenRateLimit,
@@ -12,16 +12,19 @@ import {
 import { Scope, TokenRateLimit } from "./types";
 import { GenericTokenRateLimitTable } from "./TokenRateLimitTables";
 import { mutate } from "swr";
+import { SWR_KEYS } from "@/lib/swr-keys";
 import { toast } from "@/hooks/useToast";
 import CreateRateLimitModal from "./CreateRateLimitModal";
 import { usePaidEnterpriseFeaturesEnabled } from "@/components/settings/usePaidEnterpriseFeaturesEnabled";
 import CreateButton from "@/refresh-components/buttons/CreateButton";
-import { SvgGlobe, SvgShield, SvgUser, SvgUsers } from "@opal/icons";
+import { SvgGlobe, SvgUser, SvgUsers } from "@opal/icons";
 import { Section } from "@/layouts/general-layouts";
-const BASE_URL = "/api/admin/token-rate-limits";
-const GLOBAL_TOKEN_FETCH_URL = `${BASE_URL}/global`;
-const USER_TOKEN_FETCH_URL = `${BASE_URL}/users`;
-const USER_GROUP_FETCH_URL = `${BASE_URL}/user-groups`;
+import { ADMIN_ROUTES } from "@/lib/admin-routes";
+
+const route = ADMIN_ROUTES.TOKEN_RATE_LIMITS;
+const GLOBAL_TOKEN_FETCH_URL = SWR_KEYS.globalTokenRateLimits;
+const USER_TOKEN_FETCH_URL = SWR_KEYS.userTokenRateLimits;
+const USER_GROUP_FETCH_URL = SWR_KEYS.userGroupTokenRateLimits;
 
 const GLOBAL_DESCRIPTION =
   "Global rate limits apply to all users, user groups, and API keys. When the global \
@@ -101,14 +104,14 @@ function Main() {
 
   return (
     <Section alignItems="stretch" justifyContent="start" height="auto">
-      <Text>
+      <Text as="p">
         Token rate limits enable you control how many tokens can be spent in a
         given time period. With token rate limits, you can:
       </Text>
 
       <ul className="list-disc ml-4">
         <li>
-          <Text>
+          <Text as="p">
             Set a global rate limit to control your team&apos;s overall token
             spend.
           </Text>
@@ -116,13 +119,13 @@ function Main() {
         {isPaidEnterpriseFeaturesEnabled && (
           <>
             <li>
-              <Text>
+              <Text as="p">
                 Set rate limits for users to ensure that no single user can
                 spend too many tokens.
               </Text>
             </li>
             <li>
-              <Text>
+              <Text as="p">
                 Set rate limits for user groups to control token spend for your
                 teams.
               </Text>
@@ -130,7 +133,7 @@ function Main() {
           </>
         )}
         <li>
-          <Text>Enable and disable rate limits on the fly.</Text>
+          <Text as="p">Enable and disable rate limits on the fly.</Text>
         </li>
       </ul>
 
@@ -208,9 +211,11 @@ function Main() {
 
 export default function Page() {
   return (
-    <>
-      <AdminPageTitle title="Token Rate Limits" icon={SvgShield} />
-      <Main />
-    </>
+    <SettingsLayouts.Root>
+      <SettingsLayouts.Header title={route.title} icon={route.icon} separator />
+      <SettingsLayouts.Body>
+        <Main />
+      </SettingsLayouts.Body>
+    </SettingsLayouts.Root>
   );
 }

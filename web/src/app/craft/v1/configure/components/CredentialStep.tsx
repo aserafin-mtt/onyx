@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import { Section } from "@/layouts/general-layouts";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import Modal from "@/refresh-components/Modal";
 import { SvgKey } from "@opal/icons";
 import {
@@ -229,9 +229,9 @@ export default function CredentialStep({
                   ) &&
                     (NEXT_PUBLIC_CLOUD_ENABLED || NEXT_PUBLIC_TEST_ENV) && (
                       <Button
-                        action
-                        onClick={handleAuthorize}
                         disabled={isAuthorizing}
+                        variant="action"
+                        onClick={handleAuthorize}
                         hidden={!isAuthorizeVisible}
                       >
                         {isAuthorizing
@@ -244,9 +244,8 @@ export default function CredentialStep({
                 </div>
                 {hasCredentials && (
                   <Button
-                    primary
-                    onClick={isSingleStep ? handleConnect : onContinue}
                     disabled={!selectedCredential || isConnecting}
+                    onClick={isSingleStep ? handleConnect : onContinue}
                   >
                     {isSingleStep
                       ? isConnecting
@@ -263,7 +262,7 @@ export default function CredentialStep({
                 open
                 onOpenChange={() => setCreateCredentialFormToggle(false)}
               >
-                <Modal.Content width="md" height="fit">
+                <Modal.Content width="xl" height="fit">
                   <Modal.Header
                     icon={SvgKey}
                     title={`Create a ${getSourceDisplayName(

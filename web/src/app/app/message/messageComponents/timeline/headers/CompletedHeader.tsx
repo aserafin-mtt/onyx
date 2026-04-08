@@ -6,7 +6,8 @@ import { Button } from "@opal/components";
 import Tag from "@/refresh-components/buttons/Tag";
 import Text from "@/refresh-components/texts/Text";
 import SimpleTooltip from "@/refresh-components/SimpleTooltip";
-import { Section, LineItemLayout } from "@/layouts/general-layouts";
+import { Section } from "@/layouts/general-layouts";
+import { ContentAction } from "@opal/layouts";
 import { formatDurationSeconds } from "@/lib/time";
 import { noProp } from "@/lib/utils";
 import MemoriesModal from "@/refresh-components/modals/MemoriesModal";
@@ -44,7 +45,7 @@ function MemoryTagWithTooltip({
         <MemoriesModal
           initialTargetMemoryId={memoryId}
           initialTargetIndex={memoryIndex}
-          highlightFirstOnOpen
+          highlightOnOpen
         />
       </memoriesModal.Provider>
       {memoriesModal.isOpen ? (
@@ -55,16 +56,25 @@ function MemoryTagWithTooltip({
           side="bottom"
           className="bg-background-neutral-00 text-text-01 shadow-md max-w-[17.5rem] p-1"
           tooltip={
-            <Section flexDirection="column" gap={0.25} height="auto">
-              <div className="p-1 w-full">
+            <Section
+              flexDirection="column"
+              alignItems="start"
+              padding={0.25}
+              gap={0.25}
+              height="auto"
+            >
+              <div className="p-1">
                 <Text as="p" secondaryBody text03>
                   {memoryText}
                 </Text>
               </div>
-              <LineItemLayout
-                variant="mini"
+              <ContentAction
                 icon={SvgAddLines}
                 title={operationLabel}
+                sizePreset="secondary"
+                paddingVariant="sm"
+                variant="body"
+                prominence="muted"
                 rightChildren={
                   <Button
                     prominence="tertiary"

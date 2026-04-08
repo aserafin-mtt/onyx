@@ -4,19 +4,21 @@ from fastapi import HTTPException
 from fastapi import Query
 from sqlalchemy.orm import Session
 
+from onyx.auth.permissions import require_permission
 from onyx.auth.users import current_curator_or_admin_user
-from onyx.auth.users import current_user
 from onyx.background.celery.versioned_apps.client import app as client_app
 from onyx.configs.app_configs import DISABLE_VECTOR_DB
 from onyx.configs.constants import OnyxCeleryPriority
 from onyx.configs.constants import OnyxCeleryTask
 from onyx.db.document_set import check_document_sets_are_public
+from onyx.db.document_set import delete_document_set as db_delete_document_set
 from onyx.db.document_set import fetch_all_document_sets_for_user
 from onyx.db.document_set import get_document_set_by_id
 from onyx.db.document_set import insert_document_set
 from onyx.db.document_set import mark_document_set_as_to_be_deleted
 from onyx.db.document_set import update_document_set
 from onyx.db.engine.sql_engine import get_session
+from onyx.db.enums import Permission
 from onyx.db.models import User
 from onyx.server.features.document_set.models import CheckDocSetPublicRequest
 from onyx.server.features.document_set.models import CheckDocSetPublicResponse
@@ -142,7 +144,10 @@ def delete_document_set(
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    if not DISABLE_VECTOR_DB:
+    if DISABLE_VECTOR_DB:
+        db_session.refresh(document_set)
+        db_delete_document_set(document_set, db_session)
+    else:
         client_app.send_task(
             OnyxCeleryTask.CHECK_FOR_VESPA_SYNC_TASK,
             kwargs={"tenant_id": tenant_id},
@@ -155,7 +160,7 @@ def delete_document_set(
 
 @router.get("/document-set")
 def list_document_sets_for_user(
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
     get_editable: bool = Query(
         False, description="If true, return editable document sets"
@@ -170,7 +175,7 @@ def list_document_sets_for_user(
 @router.get("/document-set-public")
 def document_set_public(
     check_public_request: CheckDocSetPublicRequest,
-    _: User = Depends(current_user),
+    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> CheckDocSetPublicResponse:
     is_public = check_document_sets_are_public(

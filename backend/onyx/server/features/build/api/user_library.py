@@ -38,7 +38,7 @@ from fastapi import UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from onyx.auth.users import current_user
+from onyx.auth.permissions import require_permission
 from onyx.background.celery.versioned_apps.client import app as celery_app
 from onyx.configs.constants import DocumentSource
 from onyx.configs.constants import OnyxCeleryQueues
@@ -48,6 +48,7 @@ from onyx.db.document import upsert_document_by_connector_credential_pair
 from onyx.db.document import upsert_documents
 from onyx.db.engine.sql_engine import get_session
 from onyx.db.enums import ConnectorCredentialPairStatus
+from onyx.db.enums import Permission
 from onyx.db.models import User
 from onyx.document_index.interfaces import DocumentMetadata
 from onyx.server.features.build.configs import USER_LIBRARY_MAX_FILE_SIZE_BYTES
@@ -200,8 +201,7 @@ def _validate_zip_contents(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Zip decompressed size ({declared_total // (1024*1024)}MB) "
-                f"would exceed storage limit."
+                f"Zip decompressed size ({declared_total // (1024 * 1024)}MB) would exceed storage limit."
             ),
         )
 
@@ -282,7 +282,7 @@ def _store_and_track_file(
 
 @router.get("/tree")
 def get_library_tree(
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> list[LibraryEntryResponse]:
     """Get user's uploaded files as a tree structure.
@@ -323,7 +323,7 @@ def get_library_tree(
 async def upload_files(
     files: list[UploadFile] = File(...),
     path: str = Form("/"),
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> UploadResponse:
     """Upload files directly to S3 and track in PostgreSQL.
@@ -372,7 +372,7 @@ async def upload_files(
         if file_size > USER_LIBRARY_MAX_FILE_SIZE_BYTES:
             raise HTTPException(
                 status_code=400,
-                detail=f"File '{file.filename}' exceeds maximum size of {USER_LIBRARY_MAX_FILE_SIZE_BYTES // (1024*1024)}MB",
+                detail=f"File '{file.filename}' exceeds maximum size of {USER_LIBRARY_MAX_FILE_SIZE_BYTES // (1024 * 1024)}MB",
             )
 
         # Validate cumulative storage (existing + this upload batch)
@@ -380,7 +380,7 @@ async def upload_files(
         if existing_usage + total_size > USER_LIBRARY_MAX_TOTAL_SIZE_BYTES:
             raise HTTPException(
                 status_code=400,
-                detail=f"Total storage would exceed maximum of {USER_LIBRARY_MAX_TOTAL_SIZE_BYTES // (1024*1024*1024)}GB",
+                detail=f"Total storage would exceed maximum of {USER_LIBRARY_MAX_TOTAL_SIZE_BYTES // (1024 * 1024 * 1024)}GB",
             )
 
         # Sanitize filename
@@ -440,7 +440,7 @@ async def upload_files(
 async def upload_zip(
     file: UploadFile = File(...),
     path: str = Form("/"),
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> UploadResponse:
     """Upload and extract a zip file, storing each extracted file to S3.
@@ -456,7 +456,7 @@ async def upload_zip(
     if len(content) > USER_LIBRARY_MAX_TOTAL_SIZE_BYTES:
         raise HTTPException(
             status_code=400,
-            detail=f"Zip file exceeds maximum size of {USER_LIBRARY_MAX_TOTAL_SIZE_BYTES // (1024*1024*1024)}GB",
+            detail=f"Zip file exceeds maximum size of {USER_LIBRARY_MAX_TOTAL_SIZE_BYTES // (1024 * 1024 * 1024)}GB",
         )
 
     # Check cumulative storage usage
@@ -517,7 +517,7 @@ async def upload_zip(
                 if existing_usage + total_size > USER_LIBRARY_MAX_TOTAL_SIZE_BYTES:
                     raise HTTPException(
                         status_code=400,
-                        detail=f"Total storage would exceed maximum of {USER_LIBRARY_MAX_TOTAL_SIZE_BYTES // (1024*1024*1024)}GB",
+                        detail=f"Total storage would exceed maximum of {USER_LIBRARY_MAX_TOTAL_SIZE_BYTES // (1024 * 1024 * 1024)}GB",
                     )
 
                 # Build path preserving zip structure
@@ -609,7 +609,7 @@ async def upload_zip(
 @router.post("/directories")
 def create_directory(
     request: CreateDirectoryRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> LibraryEntryResponse:
     """Create a virtual directory.
@@ -659,7 +659,7 @@ def create_directory(
 def toggle_file_sync(
     document_id: str,
     enabled: bool = Query(...),
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> ToggleSyncResponse:
     """Enable/disable syncing a file to sandboxes.
@@ -711,7 +711,7 @@ def toggle_file_sync(
 @router.delete("/files/{document_id}")
 def delete_file(
     document_id: str,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> DeleteFileResponse:
     """Delete a file from both S3 and the document table."""

@@ -19,6 +19,7 @@ import {
 } from "@/lib/types";
 import type { Route } from "next";
 import { useRouter } from "next/navigation";
+import Truncated from "@/refresh-components/texts/Truncated";
 import {
   FiChevronDown,
   FiChevronRight,
@@ -165,9 +166,7 @@ function ConnectorRow({
       onClick={handleRowClick}
     >
       <TableCell className="">
-        <p className="lg:w-[200px] xl:w-[400px] inline-block ellipsis truncate">
-          {ccPairsIndexingStatus.name}
-        </p>
+        <Truncated>{ccPairsIndexingStatus.name}</Truncated>
       </TableCell>
       <TableCell>
         {timeAgo(ccPairsIndexingStatus?.last_success) || "-"}
@@ -246,9 +245,7 @@ function FederatedConnectorRow({
       onClick={handleRowClick}
     >
       <TableCell className="">
-        <p className="lg:w-[200px] xl:w-[400px] inline-block ellipsis truncate">
-          {federatedConnector.name}
-        </p>
+        <Truncated>{federatedConnector.name}</Truncated>
       </TableCell>
       <TableCell>N/A</TableCell>
       <TableCell>
@@ -293,7 +290,7 @@ export function CCPairIndexingStatusTable({
   const isPaidEnterpriseFeaturesEnabled = usePaidEnterpriseFeaturesEnabled();
 
   return (
-    <Table className="-mt-8">
+    <Table className="-mt-8 table-fixed">
       <TableHeader>
         <ConnectorRow
           invisible

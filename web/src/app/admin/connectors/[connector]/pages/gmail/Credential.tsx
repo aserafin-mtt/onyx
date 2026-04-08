@@ -1,4 +1,4 @@
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import { toast } from "@/hooks/useToast";
 import React, { useState, useEffect } from "react";
 import { useSWRConfig } from "swr";
@@ -7,10 +7,7 @@ import { useRouter } from "next/navigation";
 import type { Route } from "next";
 import { adminDeleteCredential } from "@/lib/credential";
 import { setupGmailOAuth } from "@/lib/gmail";
-import {
-  DOCS_ADMINS_PATH,
-  GMAIL_AUTH_IS_ADMIN_COOKIE_NAME,
-} from "@/lib/constants";
+import { DOCS_ADMINS_PATH } from "@/lib/constants";
 import { CRAFT_OAUTH_COOKIE_NAME } from "@/app/craft/v1/constants";
 import Cookies from "js-cookie";
 import { TextFormField, SectionHeader } from "@/components/Field";
@@ -23,6 +20,7 @@ import {
 } from "@/lib/connectors/credentials";
 import { refreshAllGoogleData } from "@/lib/googleConnector";
 import { ValidSources } from "@/lib/types";
+import { SWR_KEYS } from "@/lib/swr-keys";
 import { buildSimilarCredentialInfoURL } from "@/app/admin/connector/[ccPairId]/lib";
 import { FiFile, FiCheck, FiLink, FiAlertTriangle } from "react-icons/fi";
 import { cn, truncateString } from "@/lib/utils";
@@ -81,7 +79,7 @@ const GmailCredentialUpload = ({ onSuccess }: { onSuccess?: () => void }) => {
         );
         if (response.ok) {
           toast.success("Successfully uploaded app credentials");
-          mutate("/api/manage/admin/connector/gmail/app-credential");
+          mutate(SWR_KEYS.googleConnectorAppCredential("gmail"));
           if (onSuccess) {
             onSuccess();
           }
@@ -104,7 +102,7 @@ const GmailCredentialUpload = ({ onSuccess }: { onSuccess?: () => void }) => {
         );
         if (response.ok) {
           toast.success("Successfully uploaded service account key");
-          mutate("/api/manage/admin/connector/gmail/service-account-key");
+          mutate(SWR_KEYS.googleConnectorServiceAccountKey("gmail"));
           if (onSuccess) {
             onSuccess();
           }
@@ -317,12 +315,12 @@ export const GmailJsonUploadSection = ({
           {isAdmin && !existingAuthCredential && (
             <div className="mt-2">
               <Button
-                danger
+                variant="danger"
                 onClick={async () => {
                   const endpoint =
                     localServiceAccountData?.service_account_email
-                      ? "/api/manage/admin/connector/gmail/service-account-key"
-                      : "/api/manage/admin/connector/gmail/app-credential";
+                      ? SWR_KEYS.googleConnectorServiceAccountKey("gmail")
+                      : SWR_KEYS.googleConnectorAppCredential("gmail");
 
                   const response = await fetch(endpoint, {
                     method: "DELETE",
@@ -334,12 +332,10 @@ export const GmailJsonUploadSection = ({
                     mutate(buildSimilarCredentialInfoURL(ValidSources.Gmail));
 
                     // Add additional mutations to refresh all credential-related endpoints
-                    mutate("/api/manage/admin/connector/gmail/credentials");
+                    mutate(SWR_KEYS.googleConnectorCredentials("gmail"));
+                    mutate(SWR_KEYS.googleConnectorPublicCredential("gmail"));
                     mutate(
-                      "/api/manage/admin/connector/gmail/public-credential"
-                    );
-                    mutate(
-                      "/api/manage/admin/connector/gmail/service-account-credential"
+                      SWR_KEYS.googleConnectorServiceAccountCredential("gmail")
                     );
 
                     toast.success(
@@ -473,7 +469,7 @@ export const GmailAuthSection = ({
           </div>
           <Section flexDirection="row" justifyContent="between" height="fit">
             <Button
-              danger
+              variant="danger"
               onClick={async () => {
                 handleRevokeAccess(
                   connectorExists,
@@ -485,10 +481,7 @@ export const GmailAuthSection = ({
               Revoke Access
             </Button>
             {buildMode && onCredentialCreated && (
-              <Button
-                primary
-                onClick={() => onCredentialCreated(existingCredential)}
-              >
+              <Button onClick={() => onCredentialCreated(existingCredential)}>
                 Continue
               </Button>
             )}
@@ -576,7 +569,7 @@ export const GmailAuthSection = ({
                   subtext="Enter the email of an admin/owner of the Google Organization that owns the Gmail account(s) you want to index."
                 />
                 <div className="flex">
-                  <Button type="submit" disabled={isSubmitting}>
+                  <Button disabled={isSubmitting} type="submit">
                     {isSubmitting ? "Creating..." : "Create Credential"}
                   </Button>
                 </div>
@@ -602,9 +595,6 @@ export const GmailAuthSection = ({
           onClick={async () => {
             setIsAuthenticating(true);
             try {
-              Cookies.set(GMAIL_AUTH_IS_ADMIN_COOKIE_NAME, "true", {
-                path: "/",
-              });
               if (buildMode) {
                 Cookies.set(CRAFT_OAUTH_COOKIE_NAME, "true", {
                   path: "/",

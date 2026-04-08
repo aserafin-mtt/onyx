@@ -9,10 +9,11 @@ from fastapi import Request
 from fastapi import Response
 from sqlalchemy.orm import Session
 
+from onyx.auth.permissions import require_permission
 from onyx.auth.users import current_curator_or_admin_user
-from onyx.auth.users import current_user
 from onyx.configs.constants import FederatedConnectorSource
 from onyx.db.engine.sql_engine import get_session
+from onyx.db.enums import Permission
 from onyx.db.federated import (
     create_federated_connector as db_create_federated_connector,
 )
@@ -71,8 +72,7 @@ def create_federated_connector(
     tenant_id = get_current_tenant_id()
 
     logger.info(
-        f"Creating federated connector: source={federated_connector_data.source}, "
-        f"user={user.email}, tenant_id={tenant_id}"
+        f"Creating federated connector: source={federated_connector_data.source}, user={user.email}, tenant_id={tenant_id}"
     )
 
     try:
@@ -320,7 +320,7 @@ def validate_entities(
 @router.get("/{id}/authorize")
 def get_authorize_url(
     id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> AuthorizeUrlResponse:
     """Get URL to send the user for OAuth"""
@@ -369,7 +369,7 @@ def get_authorize_url(
 @router.post("/callback")
 def handle_oauth_callback_generic(
     request: Request,
-    _: User = Depends(current_user),
+    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> OAuthCallbackResult:
     """Handle callback for any federated connector using state parameter"""
@@ -431,8 +431,7 @@ def handle_oauth_callback_generic(
     # Store OAuth token in database if we have an access token
     if oauth_result.access_token:
         logger.info(
-            f"Storing OAuth token for federated_connector_id={federated_connector_id}, "
-            f"user_id={oauth_session.user_id}"
+            f"Storing OAuth token for federated_connector_id={federated_connector_id}, user_id={oauth_session.user_id}"
         )
         update_federated_connector_oauth_token(
             db_session=db_session,
@@ -447,7 +446,7 @@ def handle_oauth_callback_generic(
 
 @router.get("")
 def get_federated_connectors(
-    _: User = Depends(current_user),
+    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> list[FederatedConnectorStatus]:
     """Get all federated connectors for display in the status table"""
@@ -467,7 +466,7 @@ def get_federated_connectors(
 
 @router.get("/oauth-status")
 def get_user_oauth_status(
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> list[UserOAuthStatus]:
     """Get OAuth status for all federated connectors for the current user"""
@@ -612,7 +611,7 @@ def delete_federated_connector_endpoint(
 @router.delete("/{id}/oauth")
 def disconnect_oauth_token(
     id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> bool:
     """Disconnect OAuth token for the current user from a federated connector"""

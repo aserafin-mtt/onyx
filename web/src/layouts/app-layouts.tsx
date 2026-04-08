@@ -20,11 +20,15 @@
 
 "use client";
 
-import { cn, ensureHrefProtocol, noProp } from "@/lib/utils";
+import {
+  cn,
+  ensureHrefProtocol,
+  INTERACTIVE_SELECTOR,
+  noProp,
+} from "@/lib/utils";
 import type { Components } from "react-markdown";
 import Text from "@/refresh-components/texts/Text";
-import Button from "@/refresh-components/buttons/Button";
-import { useCallback, useMemo, useState, useEffect } from "react";
+import { useCallback, useMemo, useRef, useState, useEffect } from "react";
 import { useAppBackground } from "@/providers/AppBackgroundProvider";
 import { useTheme } from "next-themes";
 import ShareChatSessionModal from "@/sections/modals/ShareChatSessionModal";
@@ -47,9 +51,8 @@ import Popover, { PopoverMenu } from "@/refresh-components/Popover";
 import { PopoverSearchInput } from "@/sections/sidebar/ChatButton";
 import SimplePopover from "@/refresh-components/SimplePopover";
 import { Interactive } from "@opal/core";
-import { OpenButton } from "@opal/components";
-import { LineItemLayout } from "@/layouts/general-layouts";
-import { useAppSidebarContext } from "@/providers/AppSidebarProvider";
+import { Button, OpenButton } from "@opal/components";
+import { useSidebarState } from "@/layouts/sidebar-layouts";
 import useScreenSize from "@/hooks/useScreenSize";
 import {
   SvgBubbleText,
@@ -62,10 +65,12 @@ import {
 } from "@opal/icons";
 import MinimalMarkdown from "@/components/chat/MinimalMarkdown";
 import { useSettingsContext } from "@/providers/SettingsProvider";
-import { AppMode, useAppMode } from "@/providers/AppModeProvider";
+import type { AppMode } from "@/providers/QueryControllerProvider";
 import useAppFocus from "@/hooks/useAppFocus";
 import { useQueryController } from "@/providers/QueryControllerProvider";
 import { usePaidEnterpriseFeaturesEnabled } from "@/components/settings/usePaidEnterpriseFeaturesEnabled";
+import useBrowserInfo from "@/hooks/useBrowserInfo";
+import { APP_SLOGAN } from "@/lib/constants";
 
 /**
  * App Header Component
@@ -83,10 +88,10 @@ import { usePaidEnterpriseFeaturesEnabled } from "@/components/settings/usePaidE
  */
 function Header() {
   const isPaidEnterpriseFeaturesEnabled = usePaidEnterpriseFeaturesEnabled();
-  const { appMode, setAppMode } = useAppMode();
+  const { state, setAppMode } = useQueryController();
   const settings = useSettingsContext();
   const { isMobile } = useScreenSize();
-  const { setFolded } = useAppSidebarContext();
+  const { setFolded } = useSidebarState();
   const [showShareModal, setShowShareModal] = useState(false);
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [showMoveCustomAgentModal, setShowMoveCustomAgentModal] =
@@ -105,10 +110,10 @@ function Header() {
     refreshCurrentProjectDetails,
     currentProjectId,
   } = useProjectsContext();
-  const { currentChatSession, refreshChatSessions } = useChatSessions();
+  const { currentChatSession, refreshChatSessions, removeSession } =
+    useChatSessions();
   const router = useRouter();
   const appFocus = useAppFocus();
-  const { classification } = useQueryController();
 
   const customHeaderContent =
     settings?.enterpriseSettings?.custom_header_content;
@@ -117,7 +122,8 @@ function Header() {
   // without this content still use.
   const pageWithHeaderContent = appFocus.isChat() || appFocus.isNewSession();
 
-  const effectiveMode: AppMode = appFocus.isNewSession() ? appMode : "chat";
+  const effectiveMode: AppMode =
+    appFocus.isNewSession() && state.phase === "idle" ? state.appMode : "chat";
 
   const availableProjects = useMemo(() => {
     if (!projects) return [];
@@ -187,6 +193,7 @@ function Header() {
       if (!response.ok) {
         throw new Error("Failed to delete chat session");
       }
+      removeSession(currentChatSession.id);
       await Promise.all([refreshChatSessions(), fetchProjects()]);
       router.replace("/app");
       setDeleteModalOpen(false);
@@ -194,7 +201,13 @@ function Header() {
       console.error("Failed to delete chat:", error);
       showErrorNotification("Failed to delete chat. Please try again.");
     }
-  }, [currentChatSession, refreshChatSessions, fetchProjects, router]);
+  }, [
+    currentChatSession,
+    refreshChatSessions,
+    removeSession,
+    fetchProjects,
+    router,
+  ]);
 
   const setDeleteConfirmationModalOpen = useCallback((open: boolean) => {
     setDeleteModalOpen(open);
@@ -280,7 +293,7 @@ function Header() {
           icon={SvgTrash}
           onClose={() => setDeleteModalOpen(false)}
           submit={
-            <Button danger onClick={handleDeleteChat}>
+            <Button variant="danger" onClick={handleDeleteChat}>
               Delete
             </Button>
           }
@@ -307,19 +320,20 @@ function Header() {
         */}
         <div className="flex-1 flex flex-row items-center gap-2 h-[3.3rem]">
           {isMobile && (
-            <IconButton
+            <Button
+              prominence="internal"
               icon={SvgSidebar}
               onClick={() => setFolded(false)}
-              internal
             />
           )}
           {isPaidEnterpriseFeaturesEnabled &&
             settings.isSearchModeAvailable &&
             appFocus.isNewSession() &&
-            !classification && (
+            state.phase === "idle" && (
               <Popover open={modePopoverOpen} onOpenChange={setModePopoverOpen}>
                 <Popover.Trigger asChild>
                   <OpenButton
+                    aria-label="Change app mode"
                     icon={
                       effectiveMode === "search" ? SvgSearchMenu : SvgBubbleText
                     }
@@ -384,16 +398,18 @@ function Header() {
           {appFocus.isChat() && currentChatSession && (
             <FrostedDiv className="flex shrink flex-row items-center">
               <Button
-                leftIcon={SvgShare}
-                transient={showShareModal}
-                tertiary
+                icon={SvgShare}
+                prominence="tertiary"
+                interaction={showShareModal ? "hover" : "rest"}
+                responsiveHideText
                 onClick={() => setShowShareModal(true)}
                 aria-label="share-chat-button"
               >
-                {isMobile ? "" : "Share Chat"}
+                Share
               </Button>
               <SimplePopover
                 trigger={
+                  /* TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved */
                   <IconButton
                     icon={SvgMoreHorizontal}
                     className="ml-2"
@@ -451,7 +467,7 @@ function Footer() {
     settings?.enterpriseSettings?.custom_lower_disclaimer_content ||
     `[Onyx ${
       settings?.webVersion || "dev"
-    }](https://www.onyx.app/) - Open Source AI Platform`;
+    }](https://www.onyx.app/) - ${APP_SLOGAN}`;
 
   return (
     <footer
@@ -518,8 +534,47 @@ function Root({ children, enableBackground }: AppRootProps) {
   const { hasBackground, appBackgroundUrl } = useAppBackground();
   const { resolvedTheme } = useTheme();
   const appFocus = useAppFocus();
+  const { isSafari } = useBrowserInfo();
   const isLightMode = resolvedTheme === "light";
   const showBackground = hasBackground && enableBackground;
+
+  // Track whether the chat input was focused before a mousedown, so we can
+  // restore focus on mouseup if no text was selected. This preserves
+  // click-drag text selection while keeping the input focused on plain clicks.
+  const inputWasFocused = useRef(false);
+
+  const handleMouseDown = useCallback(
+    (event: React.MouseEvent<HTMLDivElement>) => {
+      const activeEl = document.activeElement;
+      const isFocused =
+        activeEl instanceof HTMLElement &&
+        activeEl.id === "onyx-chat-input-textarea";
+      const target = event.target;
+      const isInteractive =
+        target instanceof HTMLElement && !!target.closest(INTERACTIVE_SELECTOR);
+      inputWasFocused.current = isFocused && !isInteractive;
+    },
+    []
+  );
+
+  const handleMouseUp = useCallback(() => {
+    if (!inputWasFocused.current) return;
+    inputWasFocused.current = false;
+    const sel = window.getSelection();
+    if (sel && !sel.isCollapsed) return;
+    const textarea = document.getElementById("onyx-chat-input-textarea");
+    // Only restore focus if no other element has grabbed it since mousedown.
+    if (textarea && document.activeElement !== textarea) {
+      textarea.focus();
+    }
+  }, []);
+  const horizontalBlurMask = `linear-gradient(
+    to right,
+    transparent 0%,
+    black max(0%, calc(50% - 25rem)),
+    black min(100%, calc(50% + 25rem)),
+    transparent 100%
+  )`;
 
   return (
     /* NOTE: Some elements, markdown tables in particular, refer to this `@container` in order to
@@ -530,6 +585,8 @@ function Root({ children, enableBackground }: AppRootProps) {
     */
     <div
       data-main-container
+      onMouseDown={handleMouseDown}
+      onMouseUp={handleMouseUp}
       className={cn(
         "@container flex flex-col h-full w-full relative overflow-hidden",
         showBackground && "bg-cover bg-center bg-fixed"
@@ -559,25 +616,25 @@ function Root({ children, enableBackground }: AppRootProps) {
       {showBackground && appFocus.isChat() && (
         <>
           <div className="absolute inset-0 backdrop-blur-[1px] pointer-events-none" />
-          <div
-            className="absolute z-0 inset-0 backdrop-blur-md transition-all duration-600 pointer-events-none"
-            style={{
-              maskImage: `linear-gradient(
-                to right,
-                transparent 0%,
-                black max(0%, calc(50% - 25rem)),
-                black min(100%, calc(50% + 25rem)),
-                transparent 100%
-              )`,
-              WebkitMaskImage: `linear-gradient(
-                to right,
-                transparent 0%,
-                black max(0%, calc(50% - 25rem)),
-                black min(100%, calc(50% + 25rem)),
-                transparent 100%
-              )`,
-            }}
-          />
+          {isSafari ? (
+            <div
+              className="absolute z-0 inset-0 bg-cover bg-center bg-fixed pointer-events-none"
+              style={{
+                backgroundImage: `url(${appBackgroundUrl})`,
+                filter: "blur(16px)",
+                maskImage: horizontalBlurMask,
+                WebkitMaskImage: horizontalBlurMask,
+              }}
+            />
+          ) : (
+            <div
+              className="absolute z-0 inset-0 backdrop-blur-md transition-all duration-600 pointer-events-none"
+              style={{
+                maskImage: horizontalBlurMask,
+                WebkitMaskImage: horizontalBlurMask,
+              }}
+            />
+          )}
         </>
       )}
 

@@ -17,6 +17,9 @@ from unittest.mock import patch
 import pytest
 from sqlalchemy.orm import Session
 
+from onyx.background.celery.tasks.opensearch_migration.constants import (
+    GET_VESPA_CHUNKS_SLICE_COUNT,
+)
 from onyx.background.celery.tasks.opensearch_migration.tasks import (
     is_continuation_token_done_for_all_slices,
 )
@@ -28,7 +31,6 @@ from onyx.background.celery.tasks.opensearch_migration.transformer import (
 )
 from onyx.configs.constants import PUBLIC_DOC_PAT
 from onyx.configs.constants import SOURCE_TYPE
-from onyx.context.search.models import IndexFilters
 from onyx.db.engine.sql_engine import get_session_with_current_tenant
 from onyx.db.models import Document
 from onyx.db.models import OpenSearchDocumentMigrationRecord
@@ -37,9 +39,11 @@ from onyx.db.opensearch_migration import build_sanitized_to_original_doc_id_mapp
 from onyx.db.search_settings import get_active_search_settings
 from onyx.document_index.interfaces_new import TenantState
 from onyx.document_index.opensearch.client import OpenSearchClient
+from onyx.document_index.opensearch.client import OpenSearchIndexClient
 from onyx.document_index.opensearch.client import wait_for_opensearch_with_timeout
 from onyx.document_index.opensearch.constants import DEFAULT_MAX_CHUNK_SIZE
 from onyx.document_index.opensearch.schema import DocumentChunk
+from onyx.document_index.opensearch.schema import get_opensearch_doc_chunk_id
 from onyx.document_index.opensearch.search import DocumentQuery
 from onyx.document_index.vespa.shared_utils.utils import wait_for_vespa_with_timeout
 from onyx.document_index.vespa.vespa_document_index import VespaDocumentIndex
@@ -66,6 +70,7 @@ from onyx.document_index.vespa_constants import SOURCE_LINKS
 from onyx.document_index.vespa_constants import TITLE
 from onyx.document_index.vespa_constants import TITLE_EMBEDDING
 from onyx.document_index.vespa_constants import USER_PROJECT
+from shared_configs.configs import MULTI_TENANT
 from shared_configs.contextvars import get_current_tenant_id
 from tests.external_dependency_unit.full_setup import ensure_full_deployment_setup
 
@@ -74,28 +79,26 @@ CHUNK_COUNT = 5
 
 
 def _get_document_chunks_from_opensearch(
-    opensearch_client: OpenSearchClient, document_id: str, current_tenant_id: str
+    opensearch_client: OpenSearchIndexClient,
+    document_id: str,
+    tenant_state: TenantState,
 ) -> list[DocumentChunk]:
     opensearch_client.refresh_index()
-    filters = IndexFilters(access_control_list=None, tenant_id=current_tenant_id)
-    query_body = DocumentQuery.get_from_document_id_query(
-        document_id=document_id,
-        tenant_state=TenantState(tenant_id=current_tenant_id, multitenant=False),
-        index_filters=filters,
-        include_hidden=False,
-        max_chunk_size=DEFAULT_MAX_CHUNK_SIZE,
-        min_chunk_index=None,
-        max_chunk_index=None,
-    )
-    search_hits = opensearch_client.search(
-        body=query_body,
-        search_pipeline_id=None,
-    )
-    return [search_hit.document_chunk for search_hit in search_hits]
+    results: list[DocumentChunk] = []
+    for i in range(CHUNK_COUNT):
+        document_chunk_id: str = get_opensearch_doc_chunk_id(
+            tenant_state=tenant_state,
+            document_id=document_id,
+            chunk_index=i,
+            max_chunk_size=DEFAULT_MAX_CHUNK_SIZE,
+        )
+        result = opensearch_client.get_document(document_chunk_id)
+        results.append(result)
+    return results
 
 
 def _delete_document_chunks_from_opensearch(
-    opensearch_client: OpenSearchClient, document_id: str, current_tenant_id: str
+    opensearch_client: OpenSearchIndexClient, document_id: str, current_tenant_id: str
 ) -> None:
     opensearch_client.refresh_index()
     query_body = DocumentQuery.delete_from_document_id_query(
@@ -235,6 +238,8 @@ def full_deployment_setup() -> Generator[None, None, None]:
     NOTE: We deliberately duplicate this logic from
     backend/tests/external_dependency_unit/conftest.py because we need to set
     opensearch_available just for this module, not the entire test session.
+
+    TODO(ENG-3764)(andrei): Consolidate some of these test fixtures.
     """
     # Patch ENABLE_OPENSEARCH_INDEXING_FOR_ONYX just for this test because we
     # don't yet want that enabled for all tests.
@@ -283,10 +288,10 @@ def vespa_document_index(
 def opensearch_client(
     db_session: Session,
     full_deployment_setup: None,  # noqa: ARG001
-) -> Generator[OpenSearchClient, None, None]:
+) -> Generator[OpenSearchIndexClient, None, None]:
     """Creates an OpenSearch client for the test tenant."""
     active = get_active_search_settings(db_session)
-    yield OpenSearchClient(index_name=active.primary.index_name)  # Test runs here.
+    yield OpenSearchIndexClient(index_name=active.primary.index_name)  # Test runs here.
 
 
 @pytest.fixture(scope="module")
@@ -319,9 +324,15 @@ def test_embedding_dimension(db_session: Session) -> Generator[int, None, None]:
 @pytest.fixture(scope="function")
 def patch_get_vespa_chunks_page_size() -> Generator[int, None, None]:
     test_page_size = 5
-    with patch(
-        "onyx.background.celery.tasks.opensearch_migration.tasks.GET_VESPA_CHUNKS_PAGE_SIZE",
-        test_page_size,
+    with (
+        patch(
+            "onyx.background.celery.tasks.opensearch_migration.tasks.GET_VESPA_CHUNKS_PAGE_SIZE",
+            test_page_size,
+        ),
+        patch(
+            "onyx.background.celery.tasks.opensearch_migration.constants.GET_VESPA_CHUNKS_PAGE_SIZE",
+            test_page_size,
+        ),
     ):
         yield test_page_size  # Test runs here.
 
@@ -330,7 +341,7 @@ def patch_get_vespa_chunks_page_size() -> Generator[int, None, None]:
 def test_documents(
     db_session: Session,
     vespa_document_index: VespaDocumentIndex,
-    opensearch_client: OpenSearchClient,
+    opensearch_client: OpenSearchIndexClient,
     patch_get_vespa_chunks_page_size: int,
 ) -> Generator[list[Document], None, None]:
     """
@@ -411,7 +422,7 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         db_session: Session,
         test_documents: list[Document],
         vespa_document_index: VespaDocumentIndex,
-        opensearch_client: OpenSearchClient,
+        opensearch_client: OpenSearchIndexClient,
         test_embedding_dimension: int,
         clean_migration_tables: None,  # noqa: ARG002
         enable_opensearch_indexing_for_onyx: None,  # noqa: ARG002
@@ -440,10 +451,13 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         for chunks in document_chunks.values():
             all_chunks.extend(chunks)
         vespa_document_index.index_raw_chunks(all_chunks)
+        tenant_state = TenantState(
+            tenant_id=get_current_tenant_id(), multitenant=MULTI_TENANT
+        )
 
         # Under test.
         result = migrate_chunks_from_vespa_to_opensearch_task(
-            tenant_id=get_current_tenant_id()
+            tenant_id=tenant_state.tenant_id
         )
 
         # Postcondition.
@@ -465,7 +479,7 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         # Verify chunks were indexed in OpenSearch.
         for document in test_documents:
             opensearch_chunks = _get_document_chunks_from_opensearch(
-                opensearch_client, document.id, get_current_tenant_id()
+                opensearch_client, document.id, tenant_state
             )
             assert len(opensearch_chunks) == CHUNK_COUNT
             opensearch_chunks.sort(key=lambda x: x.chunk_index)
@@ -480,7 +494,7 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         db_session: Session,
         test_documents: list[Document],
         vespa_document_index: VespaDocumentIndex,
-        opensearch_client: OpenSearchClient,
+        opensearch_client: OpenSearchIndexClient,
         test_embedding_dimension: int,
         clean_migration_tables: None,  # noqa: ARG002
         enable_opensearch_indexing_for_onyx: None,  # noqa: ARG002
@@ -510,6 +524,9 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         for chunks in document_chunks.values():
             all_chunks.extend(chunks)
         vespa_document_index.index_raw_chunks(all_chunks)
+        tenant_state = TenantState(
+            tenant_id=get_current_tenant_id(), multitenant=MULTI_TENANT
+        )
 
         # Run the initial batch. To simulate partial progress we will mock the
         # redis lock to return True for the first invocation of .owned() and
@@ -524,7 +541,7 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
             return_value=mock_redis_client,
         ):
             result_1 = migrate_chunks_from_vespa_to_opensearch_task(
-                tenant_id=get_current_tenant_id()
+                tenant_id=tenant_state.tenant_id
             )
 
         assert result_1 is True
@@ -547,7 +564,7 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         # Under test.
         # Run the remainder of the migration.
         result_2 = migrate_chunks_from_vespa_to_opensearch_task(
-            tenant_id=get_current_tenant_id()
+            tenant_id=tenant_state.tenant_id
         )
 
         # Postcondition.
@@ -571,7 +588,179 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         # Verify chunks were indexed in OpenSearch.
         for document in test_documents:
             opensearch_chunks = _get_document_chunks_from_opensearch(
-                opensearch_client, document.id, get_current_tenant_id()
+                opensearch_client, document.id, tenant_state
+            )
+            assert len(opensearch_chunks) == CHUNK_COUNT
+            opensearch_chunks.sort(key=lambda x: x.chunk_index)
+            for opensearch_chunk in opensearch_chunks:
+                _assert_chunk_matches_vespa_chunk(
+                    opensearch_chunk,
+                    document_chunks[document.id][opensearch_chunk.chunk_index],
+                )
+
+    def test_chunk_migration_visits_all_chunks_even_when_batch_size_varies(
+        self,
+        db_session: Session,
+        test_documents: list[Document],
+        vespa_document_index: VespaDocumentIndex,
+        opensearch_client: OpenSearchIndexClient,
+        test_embedding_dimension: int,
+        clean_migration_tables: None,  # noqa: ARG002
+        enable_opensearch_indexing_for_onyx: None,  # noqa: ARG002
+    ) -> None:
+        """
+        Tests that chunk migration works correctly even when the batch size
+        changes halfway through a migration.
+
+        Simulates task time running out my mocking the locking behavior.
+        """
+        # Precondition.
+        # Index chunks into Vespa.
+        document_chunks: dict[str, list[dict[str, Any]]] = {
+            document.id: [
+                _create_raw_document_chunk(
+                    document_id=document.id,
+                    chunk_index=i,
+                    content=f"Test content {i} for {document.id}",
+                    embedding=_generate_test_vector(test_embedding_dimension),
+                    now=datetime.now(),
+                    title=f"Test title {document.id}",
+                    title_embedding=_generate_test_vector(test_embedding_dimension),
+                )
+                for i in range(CHUNK_COUNT)
+            ]
+            for document in test_documents
+        }
+        all_chunks: list[dict[str, Any]] = []
+        for chunks in document_chunks.values():
+            all_chunks.extend(chunks)
+        vespa_document_index.index_raw_chunks(all_chunks)
+        tenant_state = TenantState(
+            tenant_id=get_current_tenant_id(), multitenant=MULTI_TENANT
+        )
+
+        # Run the initial batch. To simulate partial progress we will mock the
+        # redis lock to return True for the first invocation of .owned() and
+        # False subsequently.
+        # NOTE: The batch size is currently set to 5 in
+        # patch_get_vespa_chunks_page_size.
+        mock_redis_client = Mock()
+        mock_lock = Mock()
+        mock_lock.owned.side_effect = [True, False, False]
+        mock_lock.acquire.return_value = True
+        mock_redis_client.lock.return_value = mock_lock
+        with patch(
+            "onyx.background.celery.tasks.opensearch_migration.tasks.get_redis_client",
+            return_value=mock_redis_client,
+        ):
+            result_1 = migrate_chunks_from_vespa_to_opensearch_task(
+                tenant_id=tenant_state.tenant_id
+            )
+
+        assert result_1 is True
+        # Expire the session cache to see the committed changes from the task.
+        db_session.expire_all()
+
+        # Verify partial progress was saved.
+        tenant_record = db_session.query(OpenSearchTenantMigrationRecord).first()
+        assert tenant_record is not None
+        partial_chunks_migrated = tenant_record.total_chunks_migrated
+        assert partial_chunks_migrated > 0
+        # page_size applies per slice, so one iteration can fetch up to
+        # page_size * GET_VESPA_CHUNKS_SLICE_COUNT chunks total.
+        assert partial_chunks_migrated <= 5 * GET_VESPA_CHUNKS_SLICE_COUNT
+        assert tenant_record.vespa_visit_continuation_token is not None
+        # Slices are not necessarily evenly distributed across all document
+        # chunks so we can't test that every token is non-None, but certainly at
+        # least one must be.
+        assert any(json.loads(tenant_record.vespa_visit_continuation_token).values())
+        assert tenant_record.migration_completed_at is None
+        assert tenant_record.approx_chunk_count_in_vespa is not None
+
+        # Under test.
+        # Now patch the batch size to be some other number, like 2.
+        mock_redis_client = Mock()
+        mock_lock = Mock()
+        mock_lock.owned.side_effect = [True, False, False]
+        mock_lock.acquire.return_value = True
+        mock_redis_client.lock.return_value = mock_lock
+        with (
+            patch(
+                "onyx.background.celery.tasks.opensearch_migration.tasks.GET_VESPA_CHUNKS_PAGE_SIZE",
+                2,
+            ),
+            patch(
+                "onyx.background.celery.tasks.opensearch_migration.constants.GET_VESPA_CHUNKS_PAGE_SIZE",
+                2,
+            ),
+            patch(
+                "onyx.background.celery.tasks.opensearch_migration.tasks.get_redis_client",
+                return_value=mock_redis_client,
+            ),
+        ):
+            result_2 = migrate_chunks_from_vespa_to_opensearch_task(
+                tenant_id=tenant_state.tenant_id
+            )
+
+        # Postcondition.
+        assert result_2 is True
+        # Expire the session cache to see the committed changes from the task.
+        db_session.expire_all()
+
+        # Verify next partial progress was saved.
+        tenant_record = db_session.query(OpenSearchTenantMigrationRecord).first()
+        assert tenant_record is not None
+        new_partial_chunks_migrated = tenant_record.total_chunks_migrated
+        assert new_partial_chunks_migrated > partial_chunks_migrated
+        # page_size applies per slice, so one iteration can fetch up to
+        # page_size * GET_VESPA_CHUNKS_SLICE_COUNT chunks total.
+        assert new_partial_chunks_migrated <= (5 + 2) * GET_VESPA_CHUNKS_SLICE_COUNT
+        assert tenant_record.vespa_visit_continuation_token is not None
+        # Slices are not necessarily evenly distributed across all document
+        # chunks so we can't test that every token is non-None, but certainly at
+        # least one must be.
+        assert any(json.loads(tenant_record.vespa_visit_continuation_token).values())
+        assert tenant_record.migration_completed_at is None
+        assert tenant_record.approx_chunk_count_in_vespa is not None
+
+        # Under test.
+        # Run the remainder of the migration.
+        with (
+            patch(
+                "onyx.background.celery.tasks.opensearch_migration.tasks.GET_VESPA_CHUNKS_PAGE_SIZE",
+                2,
+            ),
+            patch(
+                "onyx.background.celery.tasks.opensearch_migration.constants.GET_VESPA_CHUNKS_PAGE_SIZE",
+                2,
+            ),
+        ):
+            result_3 = migrate_chunks_from_vespa_to_opensearch_task(
+                tenant_id=tenant_state.tenant_id
+            )
+
+        # Postcondition.
+        assert result_3 is True
+        # Expire the session cache to see the committed changes from the task.
+        db_session.expire_all()
+
+        # Verify completion.
+        tenant_record = db_session.query(OpenSearchTenantMigrationRecord).first()
+        assert tenant_record is not None
+        assert tenant_record.total_chunks_migrated > new_partial_chunks_migrated
+        assert tenant_record.total_chunks_migrated == len(all_chunks)
+        # Visit is complete so continuation token should be None.
+        assert tenant_record.vespa_visit_continuation_token is not None
+        assert is_continuation_token_done_for_all_slices(
+            json.loads(tenant_record.vespa_visit_continuation_token)
+        )
+        assert tenant_record.migration_completed_at is not None
+        assert tenant_record.approx_chunk_count_in_vespa == len(all_chunks)
+
+        # Verify chunks were indexed in OpenSearch.
+        for document in test_documents:
+            opensearch_chunks = _get_document_chunks_from_opensearch(
+                opensearch_client, document.id, tenant_state
             )
             assert len(opensearch_chunks) == CHUNK_COUNT
             opensearch_chunks.sort(key=lambda x: x.chunk_index)
@@ -618,7 +807,7 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         db_session: Session,
         test_documents: list[Document],
         vespa_document_index: VespaDocumentIndex,
-        opensearch_client: OpenSearchClient,
+        opensearch_client: OpenSearchIndexClient,
         test_embedding_dimension: int,
         clean_migration_tables: None,  # noqa: ARG002
         enable_opensearch_indexing_for_onyx: None,  # noqa: ARG002
@@ -659,24 +848,25 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
             chunk["content"] = (
                 f"Different content {chunk[CHUNK_ID]} for {test_documents[0].id}"
             )
+        tenant_state = TenantState(
+            tenant_id=get_current_tenant_id(), multitenant=MULTI_TENANT
+        )
         chunks_for_document_in_opensearch, _ = (
             transform_vespa_chunks_to_opensearch_chunks(
                 document_in_opensearch,
-                TenantState(tenant_id=get_current_tenant_id(), multitenant=False),
+                tenant_state,
                 {},
             )
         )
         opensearch_client.bulk_index_documents(
             documents=chunks_for_document_in_opensearch,
-            tenant_state=TenantState(
-                tenant_id=get_current_tenant_id(), multitenant=False
-            ),
+            tenant_state=tenant_state,
             update_if_exists=True,
         )
 
         # Under test.
         result = migrate_chunks_from_vespa_to_opensearch_task(
-            tenant_id=get_current_tenant_id()
+            tenant_id=tenant_state.tenant_id
         )
 
         # Postcondition.
@@ -697,7 +887,7 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         # Verify chunks were indexed in OpenSearch.
         for document in test_documents:
             opensearch_chunks = _get_document_chunks_from_opensearch(
-                opensearch_client, document.id, get_current_tenant_id()
+                opensearch_client, document.id, tenant_state
             )
             assert len(opensearch_chunks) == CHUNK_COUNT
             opensearch_chunks.sort(key=lambda x: x.chunk_index)
@@ -712,7 +902,7 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         db_session: Session,
         test_documents: list[Document],
         vespa_document_index: VespaDocumentIndex,
-        opensearch_client: OpenSearchClient,
+        opensearch_client: OpenSearchIndexClient,
         test_embedding_dimension: int,
         clean_migration_tables: None,  # noqa: ARG002
         enable_opensearch_indexing_for_onyx: None,  # noqa: ARG002
@@ -741,11 +931,14 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         for chunks in document_chunks.values():
             all_chunks.extend(chunks)
         vespa_document_index.index_raw_chunks(all_chunks)
+        tenant_state = TenantState(
+            tenant_id=get_current_tenant_id(), multitenant=MULTI_TENANT
+        )
 
         # Under test.
         # First run.
         result_1 = migrate_chunks_from_vespa_to_opensearch_task(
-            tenant_id=get_current_tenant_id()
+            tenant_id=tenant_state.tenant_id
         )
 
         # Postcondition.
@@ -766,7 +959,7 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         # Verify chunks were indexed in OpenSearch.
         for document in test_documents:
             opensearch_chunks = _get_document_chunks_from_opensearch(
-                opensearch_client, document.id, get_current_tenant_id()
+                opensearch_client, document.id, tenant_state
             )
             assert len(opensearch_chunks) == CHUNK_COUNT
             opensearch_chunks.sort(key=lambda x: x.chunk_index)
@@ -779,7 +972,7 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         # Under test.
         # Second run.
         result_2 = migrate_chunks_from_vespa_to_opensearch_task(
-            tenant_id=get_current_tenant_id()
+            tenant_id=tenant_state.tenant_id
         )
 
         # Postcondition.
@@ -801,7 +994,7 @@ class TestMigrateChunksFromVespaToOpenSearchTask:
         # Verify chunks were indexed in OpenSearch.
         for document in test_documents:
             opensearch_chunks = _get_document_chunks_from_opensearch(
-                opensearch_client, document.id, get_current_tenant_id()
+                opensearch_client, document.id, tenant_state
             )
             assert len(opensearch_chunks) == CHUNK_COUNT
             opensearch_chunks.sort(key=lambda x: x.chunk_index)

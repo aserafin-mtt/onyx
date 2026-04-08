@@ -7,6 +7,7 @@ import {
   SvgGlobe,
   SvgHardDrive,
   SvgHeadsetMic,
+  SvgShareWebhook,
   SvgKey,
   SvgLock,
   SvgPaintBrush,
@@ -21,6 +22,7 @@ import "@/app/admin/billing/billing.css";
 import type { IconProps } from "@opal/types";
 import Card from "@/refresh-components/cards/Card";
 import Button from "@/refresh-components/buttons/Button";
+import { Button as OpalButton } from "@opal/components";
 import Text from "@/refresh-components/texts/Text";
 import { Section } from "@/layouts/general-layouts";
 
@@ -69,6 +71,7 @@ const ENTERPRISE_FEATURES: PlanFeature[] = [
   { icon: SvgDashboard, text: "Full White-labeling" },
   { icon: SvgUserManage, text: "Custom Roles and Permissions" },
   { icon: SvgSliders, text: "Configurable Usage Limits" },
+  { icon: SvgShareWebhook, text: "Hook Extensions" },
   { icon: SvgServer, text: "Custom Deployments" },
   { icon: SvgGlobe, text: "Region-Specific Data Processing" },
   { icon: SvgHeadsetMic, text: "Enterprise SLAs and Priority Support" },
@@ -146,26 +149,27 @@ function PlanCard({
         {/* Button */}
         <div className="plan-card-button">
           {isCurrentPlan ? (
+            // TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved
             <Button tertiary transient className="pointer-events-none">
               <Text mainUiAction text03>
                 Your Current Plan
               </Text>
             </Button>
           ) : href ? (
-            <Button
-              main
-              secondary
+            <OpalButton
+              prominence="secondary"
               href={href}
               target="_blank"
               rel="noopener noreferrer"
             >
               {buttonLabel}
-            </Button>
+            </OpalButton>
           ) : onClick ? (
-            <Button main primary onClick={onClick} leftIcon={ButtonIcon}>
+            <OpalButton onClick={onClick} icon={ButtonIcon}>
               {buttonLabel}
-            </Button>
+            </OpalButton>
           ) : (
+            // TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved
             <Button tertiary transient className="pointer-events-none">
               <Text mainUiAction text03>
                 Included in your plan

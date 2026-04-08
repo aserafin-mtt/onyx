@@ -516,6 +516,8 @@ def _get_all_doc_ids(
     ] = default_msg_filter,
     callback: IndexingHeartbeatInterface | None = None,
     workspace_url: str | None = None,
+    start: SecondsSinceUnixEpoch | None = None,
+    end: SecondsSinceUnixEpoch | None = None,
 ) -> GenerateSlimDocumentOutput:
     """
     Get all document ids in the workspace, channel by channel
@@ -546,6 +548,8 @@ def _get_all_doc_ids(
             client=client,
             channel=channel,
             callback=callback,
+            oldest=str(start) if start else None,  # 0.0 -> None intentionally
+            latest=str(end) if end is not None else None,
         )
 
         for message_batch in channel_message_batches:
@@ -565,6 +569,7 @@ def _get_all_doc_ids(
                             channel_id=channel_id, thread_ts=message["ts"]
                         ),
                         external_access=external_access,
+                        parent_hierarchy_raw_node_id=channel_id,
                     )
                 )
 
@@ -846,8 +851,8 @@ class SlackConnector(
 
     def retrieve_all_slim_docs_perm_sync(
         self,
-        start: SecondsSinceUnixEpoch | None = None,  # noqa: ARG002
-        end: SecondsSinceUnixEpoch | None = None,  # noqa: ARG002
+        start: SecondsSinceUnixEpoch | None = None,
+        end: SecondsSinceUnixEpoch | None = None,
         callback: IndexingHeartbeatInterface | None = None,
     ) -> GenerateSlimDocumentOutput:
         if self.client is None:
@@ -860,6 +865,8 @@ class SlackConnector(
             msg_filter_func=self.msg_filter_func,
             callback=callback,
             workspace_url=self._workspace_url,
+            start=start,
+            end=end,
         )
 
     def _load_from_checkpoint(
@@ -896,9 +903,7 @@ class SlackConnector(
                 raw_channels, self.channels, self.channel_regex_enabled
             )
             logger.info(
-                f"Channels - initial checkpoint: "
-                f"all={len(raw_channels)} "
-                f"post_filtering={len(filtered_channels)}"
+                f"Channels - initial checkpoint: all={len(raw_channels)} post_filtering={len(filtered_channels)}"
             )
 
             checkpoint.channel_ids = [c["id"] for c in filtered_channels]
@@ -971,11 +976,7 @@ class SlackConnector(
             )
 
             logger.info(
-                f"Retrieved messages: "
-                f"{len(message_batch)=} "
-                f"{channel=} "
-                f"{oldest=} "
-                f"{latest=}"
+                f"Retrieved messages: {len(message_batch)=} {channel=} {oldest=} {latest=}"
             )
 
             # message_batch[0] is the newest message (Slack returns newest to oldest)
@@ -1062,10 +1063,7 @@ class SlackConnector(
             )
 
             logger.info(
-                f"Current channel processing stats: "
-                f"{range_start=} "
-                f"range_end={end} "
-                f"percent_complete={range_percent_complete=:.2f}"
+                f"Current channel processing stats: {range_start=} range_end={end} percent_complete={range_percent_complete=:.2f}"
             )
 
             checkpoint.seen_thread_ts = list(seen_thread_ts)

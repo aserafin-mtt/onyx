@@ -13,8 +13,9 @@ import {
   type KeyboardEvent,
 } from "react";
 import { useRouter } from "next/navigation";
+import { getPastedFilesIfNoText } from "@/lib/clipboard";
 import { cn, isImageFile } from "@/lib/utils";
-import { Disabled } from "@/refresh-components/Disabled";
+import { Disabled } from "@opal/core";
 import {
   useUploadFilesContext,
   BuildFile,
@@ -230,21 +231,11 @@ const InputBar = memo(
 
       const handlePaste = useCallback(
         (event: ClipboardEvent) => {
-          const items = event.clipboardData?.items;
-          if (items) {
-            const pastedFiles: File[] = [];
-            for (let i = 0; i < items.length; i++) {
-              const item = items[i];
-              if (item && item.kind === "file") {
-                const file = item.getAsFile();
-                if (file) pastedFiles.push(file);
-              }
-            }
-            if (pastedFiles.length > 0) {
-              event.preventDefault();
-              // Context handles session binding internally
-              uploadFiles(pastedFiles);
-            }
+          const pastedFiles = getPastedFilesIfNoText(event.clipboardData);
+          if (pastedFiles.length > 0) {
+            event.preventDefault();
+            // Context handles session binding internally
+            uploadFiles(pastedFiles);
           }
         },
         [uploadFiles]
@@ -374,10 +365,10 @@ const InputBar = memo(
               <div className="flex flex-row items-center gap-1">
                 {/* (+) button for file upload */}
                 <Button
+                  disabled={disabled}
                   icon={SvgPaperclip}
                   tooltip="Attach Files"
                   prominence="tertiary"
-                  disabled={disabled}
                   onClick={() => fileInputRef.current?.click()}
                 />
                 {/* Demo Data indicator pill - only show on welcome page (no session) when demo data is enabled */}
@@ -388,11 +379,11 @@ const InputBar = memo(
                   >
                     <span>
                       <SelectButton
+                        disabled={disabled}
                         leftIcon={SvgOrganization}
                         engaged={demoDataEnabled}
                         action
                         folded
-                        disabled={disabled}
                         onClick={() => router.push(CRAFT_CONFIGURE_PATH)}
                         className="bg-action-link-01"
                       >
@@ -406,6 +397,7 @@ const InputBar = memo(
               {/* Bottom right controls */}
               <div className="flex flex-row items-center gap-1">
                 {/* Submit button */}
+                {/* TODO(@raunakab): migrate to opal Button once className/iconClassName is resolved */}
                 <IconButton
                   icon={sandboxInitializing ? SvgLoader : SvgArrowUp}
                   onClick={handleSubmit}

@@ -51,9 +51,9 @@ export default function InputTypeInElementField({
         showClearButton={false}
       />
       <Button
+        disabled={!onRemove || isEmpty}
         icon={SvgMinusCircle}
         prominence="tertiary"
-        disabled={!onRemove || isEmpty}
         onClick={onRemove}
         tooltip="Remove"
       />

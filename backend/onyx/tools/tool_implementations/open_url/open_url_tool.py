@@ -534,7 +534,9 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
             timeout_occurred = [False]  # Using list for mutability in closure
 
             def _timeout_handler(
-                index: int, func: Any, args: tuple[Any, ...]  # noqa: ARG001
+                index: int,  # noqa: ARG001
+                func: Any,  # noqa: ARG001
+                args: tuple[Any, ...],  # noqa: ARG001
             ) -> None:
                 timeout_occurred[0] = True
                 return None
@@ -762,8 +764,7 @@ class OpenURLTool(Tool[OpenURLToolOverrideKwargs]):
             tags=None,
             access_control_list=access_control_list,
             tenant_id=get_current_tenant_id() if MULTI_TENANT else None,
-            user_file_ids=None,
-            project_id=None,
+            project_id_filter=None,
         )
 
     def _merge_indexed_and_crawled_results(

@@ -25,7 +25,10 @@ Some commands require external tools to be installed and configured:
 - **Docker** - Required for `compose`, `logs`, and `pull` commands
   - Install from [docker.com](https://docs.docker.com/get-docker/)
 
-- **GitHub CLI** (`gh`) - Required for `run-ci` and `cherry-pick` commands
+- **uv** - Required for `backend` commands
+  - Install from [docs.astral.sh/uv](https://docs.astral.sh/uv/)
+
+- **GitHub CLI** (`gh`) - Required for `run-ci`, `cherry-pick`, and `trace` commands
   - Install from [cli.github.com](https://cli.github.com/)
   - Authenticate with `gh auth login`
 
@@ -170,6 +173,77 @@ ods pull
 ods pull --tag edge
 ```
 
+### `backend` - Run Backend Services
+
+Run backend services (API server, model server) with environment loaded from
+`.vscode/.env`. On first run, copies `.vscode/env_template.txt` to `.vscode/.env`
+if the `.env` file does not already exist.
+
+Enterprise Edition features are enabled by default with license enforcement
+disabled, matching the `compose` command behavior.
+
+```shell
+ods backend <subcommand>
+```
+
+**Subcommands:**
+
+- `api` - Start the FastAPI backend server (`uvicorn onyx.main:app --reload`)
+- `model_server` - Start the model server (`uvicorn model_server.main:app --reload`)
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--no-ee` | `false` | Disable Enterprise Edition features (enabled by default) |
+| `--port` | `8080` (api) / `9000` (model_server) | Port to listen on |
+
+Shell environment takes precedence over `.env` file values, so inline overrides
+work as expected (e.g. `S3_ENDPOINT_URL=foo ods backend api`).
+
+**Examples:**
+
+```shell
+# Start the API server
+ods backend api
+
+# Start the API server on a custom port
+ods backend api --port 9090
+
+# Start without Enterprise Edition
+ods backend api --no-ee
+
+# Start the model server
+ods backend model_server
+
+# Start the model server on a custom port
+ods backend model_server --port 9001
+```
+
+### `web` - Run Frontend Scripts
+
+Run npm scripts from `web/package.json` without manually changing directories.
+
+```shell
+ods web <script> [args...]
+```
+
+Script names are available via shell completion (for supported shells via
+`ods completion`), and are read from `web/package.json`.
+
+**Examples:**
+
+```shell
+# Start the Next.js dev server
+ods web dev
+
+# Run web lint task
+ods web lint
+
+# Forward extra args to the script
+ods web test --watch
+```
+
 ### `db` - Database Administration
 
 Manage PostgreSQL database dumps, restores, and migrations.
@@ -222,6 +296,7 @@ ods run-ci 7353
 ### `cherry-pick` - Backport Commits to Release Branches
 
 Cherry-pick one or more commits to release branches and automatically create PRs.
+Cherry-pick PRs created by this command are labeled `cherry-pick 🍒`.
 
 ```shell
 ods cherry-pick <commit-sha> [<commit-sha>...] [--release <version>]
@@ -336,6 +411,62 @@ ods screenshot-diff upload-baselines --project admin --delete
 The `compare` subcommand writes a `summary.json` alongside the report with aggregate
 counts (changed, added, removed, unchanged). The HTML report is only generated when
 visual differences are detected.
+
+### `trace` - View Playwright Traces from CI
+
+Download Playwright trace artifacts from a GitHub Actions run and open them
+with `playwright show-trace`. Traces are only generated for failing tests
+(`retain-on-failure`).
+
+```shell
+ods trace [run-id-or-url]
+```
+
+The run can be specified as a numeric run ID, a full GitHub Actions URL, or
+omitted to find the latest Playwright run for the current branch.
+
+**Flags:**
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--branch`, `-b` | | Find latest run for this branch |
+| `--pr` | | Find latest run for this PR number |
+| `--project`, `-p` | | Filter to a specific project (`admin`, `exclusive`, `lite`) |
+| `--list`, `-l` | `false` | List available traces without opening |
+| `--no-open` | `false` | Download traces but don't open them |
+
+When multiple traces are found, an interactive picker lets you select which
+traces to open. Use arrow keys or `j`/`k` to navigate, `space` to toggle,
+`a` to select all, `n` to deselect all, and `enter` to open. Falls back to a
+plain-text prompt when no TTY is available.
+
+Downloaded artifacts are cached in `/tmp/ods-traces/<run-id>/` so repeated
+invocations for the same run are instant.
+
+**Examples:**
+
+```shell
+# Latest run for the current branch
+ods trace
+
+# Specific run ID
+ods trace 12345678
+
+# Full GitHub Actions URL
+ods trace https://github.com/onyx-dot-app/onyx/actions/runs/12345678
+
+# Latest run for a PR
+ods trace --pr 9500
+
+# Latest run for a specific branch
+ods trace --branch main
+
+# Only download admin project traces
+ods trace --project admin
+
+# List traces without opening
+ods trace --list
+```
 
 ### Testing Changes Locally (Dry Run)
 

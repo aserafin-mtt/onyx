@@ -1,10 +1,14 @@
 import React, { JSX, memo } from "react";
 import {
   ChatPacket,
+  CODE_INTERPRETER_TOOL_TYPES,
+  ImageGenerationToolPacket,
   Packet,
   PacketType,
   ReasoningPacket,
+  SearchToolStart,
   StopReason,
+  ToolCallArgumentDelta,
 } from "../../services/streamingModels";
 import {
   FullChatState,
@@ -25,10 +29,9 @@ import { DeepResearchPlanRenderer } from "./timeline/renderers/deepresearch/Deep
 import { ResearchAgentRenderer } from "./timeline/renderers/deepresearch/ResearchAgentRenderer";
 import { WebSearchToolRenderer } from "./timeline/renderers/search/WebSearchToolRenderer";
 import { InternalSearchToolRenderer } from "./timeline/renderers/search/InternalSearchToolRenderer";
-import { SearchToolStart } from "../../services/streamingModels";
 
 // Different types of chat packets using discriminated unions
-export interface GroupedPackets {
+interface GroupedPackets {
   packets: Packet[];
 }
 
@@ -55,7 +58,12 @@ function isImageToolPacket(packet: Packet) {
 }
 
 function isPythonToolPacket(packet: Packet) {
-  return packet.obj.type === PacketType.PYTHON_TOOL_START;
+  return (
+    packet.obj.type === PacketType.PYTHON_TOOL_START ||
+    (packet.obj.type === PacketType.TOOL_CALL_ARGUMENT_DELTA &&
+      (packet.obj as ToolCallArgumentDelta).tool_type ===
+        CODE_INTERPRETER_TOOL_TYPES.PYTHON)
+  );
 }
 
 function isCustomToolPacket(packet: Packet) {
@@ -153,15 +161,69 @@ export function findRenderer(
   return null;
 }
 
-// Props interface for RendererComponent
-interface RendererComponentProps {
-  packets: Packet[];
+// Handles display groups containing both chat text and image generation packets
+function MixedContentHandler({
+  chatPackets,
+  imagePackets,
+  chatState,
+  messageNodeId,
+  hasTimelineThinking,
+  onComplete,
+  animate,
+  stopPacketSeen,
+  stopReason,
+  children,
+}: {
+  chatPackets: Packet[];
+  imagePackets: Packet[];
   chatState: FullChatState;
+  messageNodeId?: number;
+  hasTimelineThinking?: boolean;
   onComplete: () => void;
   animate: boolean;
   stopPacketSeen: boolean;
   stopReason?: StopReason;
-  useShortRenderer?: boolean;
+  children: (result: RendererOutput) => JSX.Element;
+}) {
+  return (
+    <MessageTextRenderer
+      packets={chatPackets as ChatPacket[]}
+      state={chatState}
+      messageNodeId={messageNodeId}
+      hasTimelineThinking={hasTimelineThinking}
+      onComplete={() => {}}
+      animate={animate}
+      renderType={RenderType.FULL}
+      stopPacketSeen={stopPacketSeen}
+      stopReason={stopReason}
+    >
+      {(textResults) => (
+        <ImageToolRenderer
+          packets={imagePackets as ImageGenerationToolPacket[]}
+          state={chatState}
+          onComplete={onComplete}
+          animate={animate}
+          renderType={RenderType.FULL}
+          stopPacketSeen={stopPacketSeen}
+          stopReason={stopReason}
+        >
+          {(imageResults) => children([...textResults, ...imageResults])}
+        </ImageToolRenderer>
+      )}
+    </MessageTextRenderer>
+  );
+}
+
+// Props interface for RendererComponent
+interface RendererComponentProps {
+  packets: Packet[];
+  chatState: FullChatState;
+  messageNodeId?: number;
+  hasTimelineThinking?: boolean;
+  onComplete: () => void;
+  animate: boolean;
+  stopPacketSeen: boolean;
+  stopReason?: StopReason;
   children: (result: RendererOutput) => JSX.Element;
 }
 
@@ -175,8 +237,8 @@ function areRendererPropsEqual(
     prev.stopPacketSeen === next.stopPacketSeen &&
     prev.stopReason === next.stopReason &&
     prev.animate === next.animate &&
-    prev.useShortRenderer === next.useShortRenderer &&
-    prev.chatState.assistant?.id === next.chatState.assistant?.id
+    prev.chatState.agent?.id === next.chatState.agent?.id &&
+    prev.messageNodeId === next.messageNodeId
     // Skip: onComplete, children (function refs), chatState (memoized upstream)
   );
 }
@@ -185,15 +247,55 @@ function areRendererPropsEqual(
 export const RendererComponent = memo(function RendererComponent({
   packets,
   chatState,
+  messageNodeId,
+  hasTimelineThinking,
   onComplete,
   animate,
   stopPacketSeen,
   stopReason,
-  useShortRenderer = false,
   children,
 }: RendererComponentProps) {
+  // Detect mixed display groups (both chat text and image generation)
+  const hasChatPackets = packets.some((p) => isChatPacket(p));
+  const hasImagePackets = packets.some((p) => isImageToolPacket(p));
+
+  if (hasChatPackets && hasImagePackets) {
+    const sharedTypes = new Set<string>([
+      PacketType.SECTION_END,
+      PacketType.ERROR,
+    ]);
+
+    const chatPackets = packets.filter(
+      (p) =>
+        isChatPacket(p) ||
+        p.obj.type === PacketType.CITATION_INFO ||
+        sharedTypes.has(p.obj.type as string)
+    );
+    const imagePackets = packets.filter(
+      (p) =>
+        isImageToolPacket(p) ||
+        p.obj.type === PacketType.IMAGE_GENERATION_TOOL_DELTA ||
+        sharedTypes.has(p.obj.type as string)
+    );
+
+    return (
+      <MixedContentHandler
+        chatPackets={chatPackets}
+        imagePackets={imagePackets}
+        chatState={chatState}
+        messageNodeId={messageNodeId}
+        hasTimelineThinking={hasTimelineThinking}
+        onComplete={onComplete}
+        animate={animate}
+        stopPacketSeen={stopPacketSeen}
+        stopReason={stopReason}
+      >
+        {children}
+      </MixedContentHandler>
+    );
+  }
+
   const RendererFn = findRenderer({ packets });
-  const renderType = useShortRenderer ? RenderType.HIGHLIGHT : RenderType.FULL;
 
   if (!RendererFn) {
     return children([{ icon: null, status: null, content: <></> }]);
@@ -203,9 +305,11 @@ export const RendererComponent = memo(function RendererComponent({
     <RendererFn
       packets={packets as any}
       state={chatState}
+      messageNodeId={messageNodeId}
+      hasTimelineThinking={hasTimelineThinking}
       onComplete={onComplete}
       animate={animate}
-      renderType={renderType}
+      renderType={RenderType.FULL}
       stopPacketSeen={stopPacketSeen}
       stopReason={stopReason}
     >

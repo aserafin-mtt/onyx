@@ -9,16 +9,16 @@ from pydantic import BaseModel
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from onyx.auth.users import current_admin_user
+from onyx.auth.permissions import require_permission
 from onyx.auth.users import current_chat_accessible_user
 from onyx.auth.users import current_curator_or_admin_user
 from onyx.auth.users import current_limited_user
-from onyx.auth.users import current_user
 from onyx.configs.app_configs import DISABLE_VECTOR_DB
 from onyx.configs.constants import FileOrigin
 from onyx.configs.constants import MilestoneRecordType
 from onyx.configs.constants import PUBLIC_API_TAGS
 from onyx.db.engine.sql_engine import get_session
+from onyx.db.enums import Permission
 from onyx.db.models import User
 from onyx.db.persona import create_assistant_label
 from onyx.db.persona import create_update_persona
@@ -32,7 +32,7 @@ from onyx.db.persona import get_persona_snapshots_for_user
 from onyx.db.persona import get_persona_snapshots_paginated
 from onyx.db.persona import mark_persona_as_deleted
 from onyx.db.persona import mark_persona_as_not_deleted
-from onyx.db.persona import update_persona_is_default
+from onyx.db.persona import update_persona_featured
 from onyx.db.persona import update_persona_label
 from onyx.db.persona import update_persona_public_status
 from onyx.db.persona import update_persona_shared
@@ -91,24 +91,21 @@ def _validate_vector_db_knowledge(
         raise HTTPException(
             status_code=400,
             detail=(
-                "Cannot attach document sets to an assistant when "
-                "the vector database is disabled (DISABLE_VECTOR_DB is set)."
+                "Cannot attach document sets to an assistant when the vector database is disabled (DISABLE_VECTOR_DB is set)."
             ),
         )
     if persona_upsert_request.hierarchy_node_ids:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Cannot attach hierarchy nodes to an assistant when "
-                "the vector database is disabled (DISABLE_VECTOR_DB is set)."
+                "Cannot attach hierarchy nodes to an assistant when the vector database is disabled (DISABLE_VECTOR_DB is set)."
             ),
         )
     if persona_upsert_request.document_ids:
         raise HTTPException(
             status_code=400,
             detail=(
-                "Cannot attach documents to an assistant when "
-                "the vector database is disabled (DISABLE_VECTOR_DB is set)."
+                "Cannot attach documents to an assistant when the vector database is disabled (DISABLE_VECTOR_DB is set)."
             ),
         )
 
@@ -122,28 +119,28 @@ admin_agents_router = APIRouter(prefix=ADMIN_AGENTS_RESOURCE)
 agents_router = APIRouter(prefix=AGENTS_RESOURCE)
 
 
-class IsVisibleRequest(BaseModel):
-    is_visible: bool
+class IsListedRequest(BaseModel):
+    is_listed: bool
 
 
 class IsPublicRequest(BaseModel):
     is_public: bool
 
 
-class IsDefaultRequest(BaseModel):
-    is_default_persona: bool
+class IsFeaturedRequest(BaseModel):
+    is_featured: bool
 
 
-@admin_router.patch("/{persona_id}/visible")
+@admin_router.patch("/{persona_id}/listed")
 def patch_persona_visibility(
     persona_id: int,
-    is_visible_request: IsVisibleRequest,
+    is_listed_request: IsListedRequest,
     user: User = Depends(current_curator_or_admin_user),
     db_session: Session = Depends(get_session),
 ) -> None:
     update_persona_visibility(
         persona_id=persona_id,
-        is_visible=is_visible_request.is_visible,
+        is_listed=is_listed_request.is_listed,
         db_session=db_session,
         user=user,
     )
@@ -153,7 +150,7 @@ def patch_persona_visibility(
 def patch_user_persona_public_status(
     persona_id: int,
     is_public_request: IsPublicRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     try:
@@ -168,29 +165,29 @@ def patch_user_persona_public_status(
         raise HTTPException(status_code=403, detail=str(e))
 
 
-@admin_router.patch("/{persona_id}/default")
-def patch_persona_default_status(
+@admin_router.patch("/{persona_id}/featured")
+def patch_persona_featured_status(
     persona_id: int,
-    is_default_request: IsDefaultRequest,
+    is_featured_request: IsFeaturedRequest,
     user: User = Depends(current_curator_or_admin_user),
     db_session: Session = Depends(get_session),
 ) -> None:
     try:
-        update_persona_is_default(
+        update_persona_featured(
             persona_id=persona_id,
-            is_default=is_default_request.is_default_persona,
+            is_featured=is_featured_request.is_featured,
             db_session=db_session,
             user=user,
         )
     except ValueError as e:
-        logger.exception("Failed to update persona default status")
+        logger.exception("Failed to update persona featured status")
         raise HTTPException(status_code=403, detail=str(e))
 
 
 @admin_agents_router.patch("/display-priorities")
 def patch_agents_display_priorities(
     display_priority_request: DisplayPriorityRequest,
-    user: User = Depends(current_admin_user),
+    user: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     try:
@@ -268,7 +265,7 @@ def get_agents_admin_paginated(
 @admin_router.patch("/{persona_id}/undelete", tags=PUBLIC_API_TAGS)
 def undelete_persona(
     persona_id: int,
-    user: User = Depends(current_admin_user),
+    user: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     mark_persona_as_not_deleted(
@@ -282,7 +279,7 @@ def undelete_persona(
 @admin_router.post("/upload-image")
 def upload_file(
     file: UploadFile,
-    _: User = Depends(current_user),
+    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> dict[str, str]:
     file_store = get_default_file_store()
     file_type = ChatFileType.IMAGE
@@ -301,7 +298,7 @@ def upload_file(
 @basic_router.post("", tags=PUBLIC_API_TAGS)
 def create_persona(
     persona_upsert_request: PersonaUpsertRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> PersonaSnapshot:
     tenant_id = get_current_tenant_id()
@@ -317,7 +314,7 @@ def create_persona(
     )
     mt_cloud_telemetry(
         tenant_id=tenant_id,
-        distinct_id=user.email,
+        distinct_id=str(user.id),
         event=MilestoneRecordType.CREATED_ASSISTANT,
     )
 
@@ -331,7 +328,7 @@ def create_persona(
 def update_persona(
     persona_id: int,
     persona_upsert_request: PersonaUpsertRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> PersonaSnapshot:
     _validate_user_knowledge_enabled(persona_upsert_request, "update")
@@ -353,7 +350,7 @@ class PersonaLabelPatchRequest(BaseModel):
 @basic_router.get("/labels")
 def get_labels(
     db: Session = Depends(get_session),
-    _: User = Depends(current_user),
+    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> list[PersonaLabelResponse]:
     return [
         PersonaLabelResponse.from_model(label)
@@ -365,7 +362,7 @@ def get_labels(
 def create_label(
     label: PersonaLabelCreate,
     db: Session = Depends(get_session),
-    _: User = Depends(current_user),
+    _: User = Depends(require_permission(Permission.BASIC_ACCESS)),
 ) -> PersonaLabelResponse:
     """Create a new assistant label"""
     try:
@@ -382,7 +379,7 @@ def create_label(
 def patch_persona_label(
     label_id: int,
     persona_label_patch_request: PersonaLabelPatchRequest,
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     update_persona_label(
@@ -395,7 +392,7 @@ def patch_persona_label(
 @admin_router.delete("/label/{label_id}")
 def delete_label(
     label_id: int,
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     delete_persona_label(label_id=label_id, db_session=db_session)
@@ -405,6 +402,7 @@ class PersonaShareRequest(BaseModel):
     user_ids: list[UUID] | None = None
     group_ids: list[int] | None = None
     is_public: bool | None = None
+    label_ids: list[int] | None = None
 
 
 # We notify each user when a user is shared with them
@@ -412,23 +410,31 @@ class PersonaShareRequest(BaseModel):
 def share_persona(
     persona_id: int,
     persona_share_request: PersonaShareRequest,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
-    update_persona_shared(
-        persona_id=persona_id,
-        user=user,
-        db_session=db_session,
-        user_ids=persona_share_request.user_ids,
-        group_ids=persona_share_request.group_ids,
-        is_public=persona_share_request.is_public,
-    )
+    try:
+        update_persona_shared(
+            persona_id=persona_id,
+            user=user,
+            db_session=db_session,
+            user_ids=persona_share_request.user_ids,
+            group_ids=persona_share_request.group_ids,
+            is_public=persona_share_request.is_public,
+            label_ids=persona_share_request.label_ids,
+        )
+    except PermissionError as e:
+        logger.exception("Failed to share persona")
+        raise HTTPException(status_code=403, detail=str(e))
+    except ValueError as e:
+        logger.exception("Failed to share persona")
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @basic_router.delete("/{persona_id}", tags=PUBLIC_API_TAGS)
 def delete_persona(
     persona_id: int,
-    user: User = Depends(current_user),
+    user: User = Depends(require_permission(Permission.BASIC_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> None:
     mark_persona_as_deleted(

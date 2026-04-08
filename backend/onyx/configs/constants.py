@@ -12,6 +12,11 @@ SLACK_USER_TOKEN_PREFIX = "xoxp-"
 SLACK_BOT_TOKEN_PREFIX = "xoxb-"
 ONYX_EMAILABLE_LOGO_MAX_DIM = 512
 
+# The mask_string() function in encryption.py uses "•" (U+2022 BULLET) to mask secrets.
+MASK_CREDENTIAL_CHAR = "\u2022"
+# Pattern produced by mask_string for strings >= 14 chars: "abcd...wxyz" (exactly 11 chars)
+MASK_CREDENTIAL_LONG_RE = re.compile(r"^.{4}\.{3}.{4}$")
+
 SOURCE_TYPE = "source_type"
 # stored in the `metadata` of a chunk. Used to signify that this chunk should
 # not be used for QA. For example, Google Drive file types which can't be parsed
@@ -84,7 +89,6 @@ POSTGRES_CELERY_WORKER_LIGHT_APP_NAME = "celery_worker_light"
 POSTGRES_CELERY_WORKER_DOCPROCESSING_APP_NAME = "celery_worker_docprocessing"
 POSTGRES_CELERY_WORKER_DOCFETCHING_APP_NAME = "celery_worker_docfetching"
 POSTGRES_CELERY_WORKER_INDEXING_CHILD_APP_NAME = "celery_worker_indexing_child"
-POSTGRES_CELERY_WORKER_BACKGROUND_APP_NAME = "celery_worker_background"
 POSTGRES_CELERY_WORKER_HEAVY_APP_NAME = "celery_worker_heavy"
 POSTGRES_CELERY_WORKER_MONITORING_APP_NAME = "celery_worker_monitoring"
 POSTGRES_CELERY_WORKER_USER_FILE_PROCESSING_APP_NAME = (
@@ -167,8 +171,24 @@ CELERY_USER_FILE_PROCESSING_TASK_EXPIRES = 60  # 1 minute (in seconds)
 # beat generator stops adding more.  Prevents unbounded queue growth when workers
 # fall behind.
 USER_FILE_PROCESSING_MAX_QUEUE_DEPTH = 500
+# How long a queued user-file-project-sync task remains valid.
+# Should be short enough to discard stale queue entries under load while still
+# allowing workers enough time to pick up new tasks.
+CELERY_USER_FILE_PROJECT_SYNC_TASK_EXPIRES = 60  # 1 minute (in seconds)
+
+# Max queue depth before user-file-project-sync producers stop enqueuing.
+# This applies backpressure when workers are falling behind.
+USER_FILE_PROJECT_SYNC_MAX_QUEUE_DEPTH = 500
 
 CELERY_USER_FILE_PROJECT_SYNC_LOCK_TIMEOUT = 5 * 60  # 5 minutes (in seconds)
+
+# How long a queued user-file-delete task is valid before workers discard it.
+# Mirrors the processing task expiry to prevent indefinite queue growth when
+# files are stuck in DELETING status and the beat keeps re-enqueuing them.
+CELERY_USER_FILE_DELETE_TASK_EXPIRES = 60  # 1 minute (in seconds)
+
+# Max queue depth before the delete beat stops enqueuing more delete tasks.
+USER_FILE_DELETE_MAX_QUEUE_DEPTH = 500
 
 CELERY_SANDBOX_FILE_SYNC_LOCK_TIMEOUT = 5 * 60  # 5 minutes (in seconds)
 
@@ -197,6 +217,7 @@ class DocumentSource(str, Enum):
     PRODUCTBOARD = "productboard"
     FILE = "file"
     CODA = "coda"
+    CANVAS = "canvas"
     NOTION = "notion"
     ZULIP = "zulip"
     LINEAR = "linear"
@@ -375,10 +396,6 @@ class MilestoneRecordType(str, Enum):
     REQUESTED_CONNECTOR = "requested_connector"
 
 
-class PostgresAdvisoryLocks(Enum):
-    KOMBU_MESSAGE_CLEANUP_LOCK_ID = auto()
-
-
 class OnyxCeleryQueues:
     # "celery" is the default queue defined by celery and also the queue
     # we are running in the primary worker to run system tasks
@@ -459,8 +476,12 @@ class OnyxRedisLocks:
     USER_FILE_QUEUED_PREFIX = "da_lock:user_file_queued"
     USER_FILE_PROJECT_SYNC_BEAT_LOCK = "da_lock:check_user_file_project_sync_beat"
     USER_FILE_PROJECT_SYNC_LOCK_PREFIX = "da_lock:user_file_project_sync"
+    USER_FILE_PROJECT_SYNC_QUEUED_PREFIX = "da_lock:user_file_project_sync_queued"
     USER_FILE_DELETE_BEAT_LOCK = "da_lock:check_user_file_delete_beat"
     USER_FILE_DELETE_LOCK_PREFIX = "da_lock:user_file_delete"
+    # Short-lived key set when a delete task is enqueued; cleared when the worker picks it up.
+    # Prevents the beat from re-enqueuing the same file while a delete task is already queued.
+    USER_FILE_DELETE_QUEUED_PREFIX = "da_lock:user_file_delete_queued"
 
     # Release notes
     RELEASE_NOTES_FETCH_LOCK = "da_lock:release_notes_fetch"
@@ -557,7 +578,6 @@ class OnyxCeleryTask:
     MONITOR_PROCESS_MEMORY = "monitor_process_memory"
     CELERY_BEAT_HEARTBEAT = "celery_beat_heartbeat"
 
-    KOMBU_MESSAGE_CLEANUP_TASK = "kombu_message_cleanup_task"
     CONNECTOR_PERMISSION_SYNC_GENERATOR_TASK = (
         "connector_permission_sync_generator_task"
     )
@@ -588,6 +608,9 @@ class OnyxCeleryTask:
 
     EXPORT_QUERY_HISTORY_TASK = "export_query_history_task"
     EXPORT_QUERY_HISTORY_CLEANUP_TASK = "export_query_history_cleanup_task"
+
+    # Hook execution log retention
+    HOOK_EXECUTION_LOG_CLEANUP_TASK = "hook_execution_log_cleanup_task"
 
     # Sandbox cleanup
     CLEANUP_IDLE_SANDBOXES = "cleanup_idle_sandboxes"
@@ -650,6 +673,7 @@ DocumentSourceDescription: dict[DocumentSource, str] = {
     DocumentSource.SLAB: "slab data",
     DocumentSource.PRODUCTBOARD: "productboard data (boards, etc.)",
     DocumentSource.FILE: "files",
+    DocumentSource.CANVAS: "canvas lms - courses, pages, assignments, and announcements",
     DocumentSource.CODA: "coda - team workspace with docs, tables, and pages",
     DocumentSource.NOTION: "notion data - a workspace that combines note-taking, \
 project management, and collaboration tools into a single, customizable platform",

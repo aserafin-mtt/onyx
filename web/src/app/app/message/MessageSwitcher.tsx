@@ -33,10 +33,10 @@ export default function MessageSwitcher({
       data-testid="MessageSwitcher/container"
     >
       <Button
+        disabled={disableForStreaming}
         icon={SvgChevronLeft}
         onClick={previous}
         prominence="tertiary"
-        disabled={disableForStreaming}
         tooltip={disableForStreaming ? DISABLED_MESSAGE : "Previous"}
       />
 
@@ -53,10 +53,10 @@ export default function MessageSwitcher({
       </div>
 
       <Button
+        disabled={disableForStreaming}
         icon={SvgChevronRight}
         onClick={next}
         prominence="tertiary"
-        disabled={disableForStreaming}
         tooltip={disableForStreaming ? DISABLED_MESSAGE : "Next"}
       />
     </div>

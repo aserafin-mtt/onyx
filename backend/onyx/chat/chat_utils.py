@@ -5,6 +5,7 @@ from typing import cast
 from uuid import UUID
 
 from fastapi.datastructures import Headers
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from onyx.chat.models import ChatHistoryResult
@@ -30,6 +31,8 @@ from onyx.file_processing.extract_file_text import extract_file_text
 from onyx.file_store.file_store import get_default_file_store
 from onyx.file_store.models import ChatFileType
 from onyx.file_store.models import FileDescriptor
+from onyx.file_store.utils import plaintext_file_name_for_id
+from onyx.file_store.utils import store_plaintext
 from onyx.kg.models import KGException
 from onyx.kg.setup.kg_default_entity_definitions import (
     populate_missing_default_entity_types__commit,
@@ -47,6 +50,60 @@ from onyx.utils.timing import log_function_time
 
 logger = setup_logger()
 IMAGE_GENERATION_TOOL_NAME = "generate_image"
+
+
+class FileContextResult(BaseModel):
+    """Result of building a file's LLM context representation."""
+
+    message: ChatMessageSimple
+    tool_metadata: FileToolMetadata
+
+
+def build_file_context(
+    tool_file_id: str,
+    filename: str,
+    file_type: ChatFileType,
+    content_text: str | None = None,
+    token_count: int = 0,
+    approx_char_count: int | None = None,
+) -> FileContextResult:
+    """Build the LLM context representation for a single file.
+
+    Centralises how files should appear in the LLM prompt
+    — the ID that FileReaderTool accepts (``UserFile.id`` for user files).
+    """
+    if file_type.use_metadata_only():
+        message_text = (
+            f"File: {filename} (id={tool_file_id})\n"
+            "Use the file_reader or python tools to access "
+            "this file's contents."
+        )
+        message = ChatMessageSimple(
+            message=message_text,
+            token_count=max(1, len(message_text) // 4),
+            message_type=MessageType.USER,
+            file_id=tool_file_id,
+        )
+    else:
+        message_text = f"File: {filename}\n{content_text or ''}\nEnd of File"
+        message = ChatMessageSimple(
+            message=message_text,
+            token_count=token_count,
+            message_type=MessageType.USER,
+            file_id=tool_file_id,
+        )
+
+    metadata = FileToolMetadata(
+        file_id=tool_file_id,
+        filename=filename,
+        approx_char_count=(
+            approx_char_count
+            if approx_char_count is not None
+            else len(content_text or "")
+        ),
+    )
+
+    return FileContextResult(message=message, tool_metadata=metadata)
 
 
 def create_chat_session_from_request(
@@ -270,7 +327,10 @@ def extract_headers(
 
 
 def process_kg_commands(
-    message: str, persona_name: str, tenant_id: str, db_session: Session  # noqa: ARG001
+    message: str,
+    persona_name: str,
+    tenant_id: str,  # noqa: ARG001
+    db_session: Session,
 ) -> None:
     # Temporarily, until we have a draft UI for the KG Operations/Management
     # TODO: move to api endpoint once we get frontend
@@ -284,6 +344,33 @@ def process_kg_commands(
     if message == "kg_setup":
         populate_missing_default_entity_types__commit(db_session=db_session)
         raise KGException("KG setup done")
+
+
+def _get_or_extract_plaintext(
+    file_id: str,
+    extract_fn: Callable[[], str],
+) -> str:
+    """Load cached plaintext for a file, or extract and store it.
+
+    Tries to read pre-stored plaintext from the file store.  On a miss,
+    calls extract_fn to produce the text, then stores the result so
+    future calls skip the expensive extraction.
+    """
+    file_store = get_default_file_store()
+    plaintext_key = plaintext_file_name_for_id(file_id)
+
+    # Try cached plaintext first.
+    try:
+        plaintext_io = file_store.read_file(plaintext_key, mode="b")
+        return plaintext_io.read().decode("utf-8")
+    except Exception:
+        logger.exception(f"Error when reading file, id={file_id}")
+
+    # Cache miss — extract and store.
+    content_text = extract_fn()
+    if content_text:
+        store_plaintext(file_id, content_text)
+    return content_text
 
 
 @log_function_time(print_only=True)
@@ -300,12 +387,23 @@ def load_chat_file(
     file_type = ChatFileType(file_descriptor["type"])
 
     if file_type.is_text_file():
-        try:
-            content_text = extract_file_text(
+        file_id = file_descriptor["id"]
+
+        def _extract() -> str:
+            return extract_file_text(
                 file=file_io,
                 file_name=file_descriptor.get("name") or "",
                 break_on_unprocessable=False,
             )
+
+        # Use the user_file_id as cache key when available (matches what
+        # the celery indexing worker stores), otherwise fall back to the
+        # file store id (covers code-interpreter-generated files, etc.).
+        user_file_id_str = file_descriptor.get("user_file_id")
+        cache_key = user_file_id_str or file_id
+
+        try:
+            content_text = _get_or_extract_plaintext(cache_key, _extract)
         except Exception as e:
             logger.warning(
                 f"Failed to retrieve content for file {file_descriptor['id']}: {str(e)}"
@@ -461,7 +559,7 @@ def _build_tool_call_response_history_message(
 def convert_chat_history(
     chat_history: list[ChatMessage],
     files: list[ChatLoadedFile],
-    project_image_files: list[ChatLoadedFile],
+    context_image_files: list[ChatLoadedFile],
     additional_context: str | None,
     token_counter: Callable[[str], int],
     tool_id_to_name_map: dict[int, str],
@@ -495,7 +593,7 @@ def convert_chat_history(
     for idx, chat_message in enumerate(chat_history):
         if chat_message.message_type == MessageType.USER:
             # Process files attached to this message
-            text_files: list[ChatLoadedFile] = []
+            text_files: list[tuple[ChatLoadedFile, FileDescriptor]] = []
             image_files: list[ChatLoadedFile] = []
 
             if chat_message.files:
@@ -506,34 +604,26 @@ def convert_chat_history(
                         if loaded_file.file_type == ChatFileType.IMAGE:
                             image_files.append(loaded_file)
                         else:
-                            # Text files (DOC, PLAIN_TEXT, CSV) are added as separate messages
-                            text_files.append(loaded_file)
+                            # Text files (DOC, PLAIN_TEXT, TABULAR) are added as separate messages
+                            text_files.append((loaded_file, file_descriptor))
 
             # Add text files as separate messages before the user message.
             # Each message is tagged with ``file_id`` so that forgotten files
             # can be detected after context-window truncation.
-            for text_file in text_files:
-                file_text = text_file.content_text or ""
-                filename = text_file.filename
-                message = (
-                    f"File: {filename}\n{file_text}\nEnd of File"
-                    if filename
-                    else file_text
+            for text_file, fd in text_files:
+                # Use user_file_id as the FileReaderTool accepts that.
+                # Fall back to the file-store path id.
+                tool_id = fd.get("user_file_id") or text_file.file_id
+                filename = text_file.filename or "unknown"
+                ctx = build_file_context(
+                    tool_file_id=tool_id,
+                    filename=filename,
+                    file_type=text_file.file_type,
+                    content_text=text_file.content_text,
+                    token_count=text_file.token_count,
                 )
-                simple_messages.append(
-                    ChatMessageSimple(
-                        message=message,
-                        token_count=text_file.token_count,
-                        message_type=MessageType.USER,
-                        image_files=None,
-                        file_id=text_file.file_id,
-                    )
-                )
-                all_injected_file_metadata[text_file.file_id] = FileToolMetadata(
-                    file_id=text_file.file_id,
-                    filename=filename or "unknown",
-                    approx_char_count=len(file_text),
-                )
+                simple_messages.append(ctx.message)
+                all_injected_file_metadata[tool_id] = ctx.tool_metadata
 
             # Sum token counts from image files (excluding project image files)
             image_token_count = (
@@ -541,11 +631,11 @@ def convert_chat_history(
             )
 
             # Add the user message with image files attached
-            # If this is the last USER message, also include project_image_files
-            # Note: project image file tokens are NOT counted in the token count
+            # If this is the last USER message, also include context_image_files
+            # Note: context image file tokens are NOT counted in the token count
             if idx == last_user_message_idx:
-                if project_image_files:
-                    image_files.extend(project_image_files)
+                if context_image_files:
+                    image_files.extend(context_image_files)
 
                 if additional_context:
                     simple_messages.append(

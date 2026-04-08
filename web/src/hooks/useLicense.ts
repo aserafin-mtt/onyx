@@ -3,28 +3,15 @@ import useSWR from "swr";
 import { NEXT_PUBLIC_CLOUD_ENABLED } from "@/lib/constants";
 import { errorHandlingFetcher } from "@/lib/fetcher";
 import { LicenseStatus } from "@/lib/billing/interfaces";
+import { SWR_KEYS } from "@/lib/swr-keys";
 
 /**
  * Hook to fetch license status for self-hosted deployments.
  *
- * Returns license information including seats, expiry, and status.
- * Only fetches for self-hosted deployments (cloud uses tenant auth instead).
- *
- * @example
- * ```tsx
- * const { data, isLoading, error, refresh } = useLicense();
- *
- * if (isLoading) return <Loading />;
- * if (error) return <Error />;
- * if (!data?.has_license) return <NoLicense />;
- *
- * return <LicenseDetails license={data} />;
- * ```
+ * Skips the fetch on cloud deployments (uses tenant auth instead).
  */
 export function useLicense() {
-  // Only fetch license for self-hosted deployments
-  // Cloud deployments use tenant-based auth, not license files
-  const url = NEXT_PUBLIC_CLOUD_ENABLED ? null : "/api/license";
+  const url = NEXT_PUBLIC_CLOUD_ENABLED ? null : SWR_KEYS.license;
 
   const { data, error, mutate, isLoading } = useSWR<LicenseStatus>(
     url,
@@ -32,26 +19,21 @@ export function useLicense() {
     {
       revalidateOnFocus: false,
       revalidateOnReconnect: false,
+      revalidateIfStale: false,
       dedupingInterval: 30000,
       shouldRetryOnError: false,
       keepPreviousData: true,
     }
   );
 
-  // Return empty state for cloud deployments
-  if (NEXT_PUBLIC_CLOUD_ENABLED) {
+  if (!url) {
     return {
-      data: null,
+      data: undefined,
       isLoading: false,
       error: undefined,
       refresh: () => Promise.resolve(undefined),
     };
   }
 
-  return {
-    data,
-    isLoading,
-    error,
-    refresh: mutate,
-  };
+  return { data, isLoading, error, refresh: mutate };
 }

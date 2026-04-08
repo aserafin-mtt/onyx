@@ -46,10 +46,11 @@ export const MemoryToolRenderer: MessageRenderer<MemoryToolPacket, {}> = ({
     return children([
       {
         icon: SvgEditBig,
-        status: null,
+        status: "Memory",
         content: <div />,
         supportsCollapsible: false,
         timelineLayout: "timeline",
+        noPaddingRight: true,
       },
     ]);
   }
@@ -87,6 +88,7 @@ export const MemoryToolRenderer: MessageRenderer<MemoryToolPacket, {}> = ({
         status: "Memory",
         supportsCollapsible: false,
         timelineLayout: "timeline",
+        noPaddingRight: true,
         content,
       },
     ]);
@@ -101,7 +103,7 @@ export const MemoryToolRenderer: MessageRenderer<MemoryToolPacket, {}> = ({
         <MemoriesModal
           initialTargetMemoryId={memoryId}
           initialTargetIndex={index}
-          highlightFirstOnOpen
+          highlightOnOpen
         />
       </memoriesModal.Provider>
       {memoryText ? (
@@ -156,6 +158,7 @@ export const MemoryToolRenderer: MessageRenderer<MemoryToolPacket, {}> = ({
       status: statusLabel,
       supportsCollapsible: false,
       timelineLayout: "timeline",
+      noPaddingRight: true,
       content: memoryContent,
     },
   ]);

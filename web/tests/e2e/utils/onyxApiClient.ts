@@ -42,6 +42,7 @@ const E2E_IMAGE_GEN_API_KEY =
  * - `deleteProvider(id)` - Deletes an LLM provider
  *
  * **User Groups:**
+ * - `getUserGroups()` - Lists all user groups (including default system groups)
  * - `createUserGroup(name)` - Creates a user group
  * - `deleteUserGroup(id)` - Deletes a user group
  *
@@ -218,15 +219,31 @@ export class OnyxApiClient {
   }
 
   /**
+   * Checks whether the vector database is enabled in this deployment.
+   *
+   * @returns true if vector DB is enabled, false if DISABLE_VECTOR_DB is set
+   */
+  async isVectorDbEnabled(): Promise<boolean> {
+    const response = await this.get("/settings");
+    const data = await this.handleResponse<{ vector_db_enabled: boolean }>(
+      response,
+      "Failed to fetch settings"
+    );
+    return data.vector_db_enabled;
+  }
+
+  /**
    * Creates a simple file connector with mock credentials.
    * This enables the Knowledge toggle in assistant creation.
    *
    * @param connectorName - Name for the connector (defaults to "Test File Connector")
+   * @param accessType - Access type for the connector (defaults to "public")
    * @returns The connector-credential pair ID (ccPairId)
    * @throws Error if the connector creation fails
    */
   async createFileConnector(
-    connectorName: string = "Test File Connector"
+    connectorName: string = "Test File Connector",
+    accessType: "public" | "private" = "public"
   ): Promise<number> {
     const response = await this.post(
       "/manage/admin/connector-with-mock-credential",
@@ -240,7 +257,7 @@ export class OnyxApiClient {
         refresh_freq: null,
         prune_freq: null,
         indexing_start: null,
-        access_type: "public",
+        access_type: accessType,
         groups: [],
       }
     );
@@ -443,7 +460,10 @@ export class OnyxApiClient {
     }>
   > {
     const response = await this.get("/admin/llm/provider");
-    return await this.handleResponse(response, "Failed to list LLM providers");
+    const data = await this.handleResponse<{
+      providers: Array<{ id: number; is_public?: boolean }>;
+    }>(response, "Failed to list LLM providers");
+    return data.providers;
   }
 
   /**
@@ -465,6 +485,7 @@ export class OnyxApiClient {
       return null;
     }
 
+    const defaultModelName = "gpt-4o";
     const response = await this.request.put(
       `${this.baseUrl}/admin/llm/provider?is_creation=true`,
       {
@@ -472,10 +493,10 @@ export class OnyxApiClient {
           name: providerName,
           provider: "openai",
           api_key: E2E_LLM_PROVIDER_API_KEY,
-          default_model_name: "gpt-4o",
           is_public: true,
           groups: [],
           personas: [],
+          model_configurations: [{ name: defaultModelName, is_visible: true }],
         },
       }
     );
@@ -486,7 +507,7 @@ export class OnyxApiClient {
     );
 
     // Set as default so get_default_llm() works (needed for tokenization, etc.)
-    await this.setProviderAsDefault(responseData.id);
+    await this.setProviderAsDefault(responseData.id, defaultModelName);
 
     this.log(
       `Created public LLM provider: ${providerName} (ID: ${responseData.id})`
@@ -495,14 +516,19 @@ export class OnyxApiClient {
   }
 
   /**
-   * Sets an LLM provider as the default for chat.
+   * Sets an LLM provider + model as the default for chat.
    *
    * @param providerId - The provider ID to set as default
+   * @param modelName - The model name to set as default
    */
-  async setProviderAsDefault(providerId: number): Promise<void> {
-    const response = await this.post(
-      `/admin/llm/provider/${providerId}/default`
-    );
+  async setProviderAsDefault(
+    providerId: number,
+    modelName: string
+  ): Promise<void> {
+    const response = await this.post("/admin/llm/default", {
+      provider_id: providerId,
+      model_name: modelName,
+    });
 
     await this.handleResponseSoft(
       response,
@@ -517,8 +543,14 @@ export class OnyxApiClient {
    *
    * @param providerId - The provider ID to delete
    */
-  async deleteProvider(providerId: number): Promise<void> {
-    const response = await this.delete(`/admin/llm/provider/${providerId}`);
+  async deleteProvider(
+    providerId: number,
+    { force = false }: { force?: boolean } = {}
+  ): Promise<void> {
+    const query = force ? "?force=true" : "";
+    const response = await this.delete(
+      `/admin/llm/provider/${providerId}${query}`
+    );
 
     await this.handleResponseSoft(
       response,
@@ -532,17 +564,20 @@ export class OnyxApiClient {
    * Creates a user group.
    *
    * @param groupName - Name for the user group
+   * @param userIds - Optional list of user IDs to add to the group
+   * @param ccPairIds - Optional list of connector-credential pair IDs to associate
    * @returns The user group ID
    * @throws Error if the user group creation fails
    */
   async createUserGroup(
     groupName: string,
-    userIds: string[] = []
+    userIds: string[] = [],
+    ccPairIds: number[] = []
   ): Promise<number> {
     const response = await this.post("/manage/admin/user-group", {
       name: groupName,
       user_ids: userIds,
-      cc_pair_ids: [],
+      cc_pair_ids: ccPairIds,
     });
 
     const responseData = await this.handleResponse<{ id: number }>(
@@ -552,6 +587,34 @@ export class OnyxApiClient {
 
     this.log(`Created user group: ${groupName} (ID: ${responseData.id})`);
     return responseData.id;
+  }
+
+  /**
+   * Polls until a user group has finished syncing (is_up_to_date === true).
+   * Newly created groups start syncing immediately; many mutation endpoints
+   * reject requests while the group is still syncing.
+   */
+  async waitForGroupSync(
+    groupId: number,
+    timeout: number = 30000
+  ): Promise<void> {
+    await expect
+      .poll(
+        async () => {
+          const res = await this.get("/manage/admin/user-group");
+          const groups = await res.json();
+          const group = groups.find(
+            (g: { id: number; is_up_to_date: boolean }) => g.id === groupId
+          );
+          return group?.is_up_to_date ?? false;
+        },
+        {
+          message: `User group ${groupId} did not finish syncing`,
+          timeout,
+        }
+      )
+      .toBe(true);
+    this.log(`User group ${groupId} finished syncing`);
   }
 
   /**
@@ -568,6 +631,18 @@ export class OnyxApiClient {
     );
 
     this.log(`Deleted user group: ${groupId}`);
+  }
+
+  /**
+   * Lists all user groups.
+   */
+  async getUserGroups(): Promise<
+    Array<{ id: number; name: string; is_default: boolean }>
+  > {
+    const response = await this.get(
+      "/manage/admin/user-group?include_default=true"
+    );
+    return response.json();
   }
 
   async setUserRole(
@@ -631,28 +706,62 @@ export class OnyxApiClient {
     return tools.find((tool) => tool.name === name) ?? null;
   }
 
-  async deleteAssistant(assistantId: number): Promise<boolean> {
+  async deleteAgent(agentId: number): Promise<boolean> {
     const response = await this.request.delete(
-      `${this.baseUrl}/persona/${assistantId}`
+      `${this.baseUrl}/persona/${agentId}`
     );
     const success = await this.handleResponseSoft(
       response,
-      `Failed to delete assistant ${assistantId}`
+      `Failed to delete assistant ${agentId}`
     );
     if (success) {
-      this.log(`Deleted assistant ${assistantId}`);
+      this.log(`Deleted assistant ${agentId}`);
     }
     return success;
   }
 
-  async getAssistant(assistantId: number): Promise<{
+  async getAssistant(agentId: number): Promise<{
     id: number;
+    is_public: boolean;
+    users: Array<{ id: string }>;
+    groups: number[];
     tools: Array<{ id: number; mcp_server_id?: number | null }>;
   }> {
-    const response = await this.get(`/persona/${assistantId}`);
+    const response = await this.get(`/persona/${agentId}`);
     return await this.handleResponse(
       response,
-      `Failed to fetch assistant ${assistantId}`
+      `Failed to fetch assistant ${agentId}`
+    );
+  }
+
+  async updateAgentSharing(
+    agentId: number,
+    options: {
+      userIds?: string[];
+      groupIds?: number[];
+      isPublic?: boolean;
+      labelIds?: number[];
+    }
+  ): Promise<void> {
+    const response = await this.request.patch(
+      `${this.baseUrl}/persona/${agentId}/share`,
+      {
+        data: {
+          user_ids: options.userIds,
+          group_ids: options.groupIds,
+          is_public: options.isPublic,
+          label_ids: options.labelIds,
+        },
+      }
+    );
+    await this.handleResponse(
+      response,
+      `Failed to update sharing for assistant ${agentId}`
+    );
+    this.log(
+      `Updated assistant sharing: ${agentId} (is_public=${String(
+        options.isPublic
+      )})`
     );
   }
 
@@ -665,7 +774,7 @@ export class OnyxApiClient {
     return data.mcp_servers;
   }
 
-  async listAssistants(options?: {
+  async listAgents(options?: {
     includeDeleted?: boolean;
     getEditable?: boolean;
   }): Promise<any[]> {
@@ -686,11 +795,11 @@ export class OnyxApiClient {
     );
   }
 
-  async findAssistantByName(
+  async findAgentByName(
     name: string,
     options?: { includeDeleted?: boolean; getEditable?: boolean }
   ): Promise<any | null> {
-    const assistants = await this.listAssistants(options);
+    const assistants = await this.listAgents(options);
     return assistants.find((assistant) => assistant.name === name) ?? null;
   }
 
@@ -1039,6 +1148,62 @@ export class OnyxApiClient {
     );
   }
 
+  // === User Management Methods ===
+
+  async deactivateUser(email: string): Promise<void> {
+    const response = await this.request.patch(
+      `${this.baseUrl}/manage/admin/deactivate-user`,
+      { data: { user_email: email } }
+    );
+    await this.handleResponse(response, `Failed to deactivate user ${email}`);
+    this.log(`Deactivated user: ${email}`);
+  }
+
+  async activateUser(email: string): Promise<void> {
+    const response = await this.request.patch(
+      `${this.baseUrl}/manage/admin/activate-user`,
+      { data: { user_email: email } }
+    );
+    await this.handleResponse(response, `Failed to activate user ${email}`);
+    this.log(`Activated user: ${email}`);
+  }
+
+  async deleteUser(email: string): Promise<void> {
+    const response = await this.request.delete(
+      `${this.baseUrl}/manage/admin/delete-user`,
+      { data: { user_email: email } }
+    );
+    await this.handleResponse(response, `Failed to delete user ${email}`);
+    this.log(`Deleted user: ${email}`);
+  }
+
+  async cancelInvite(email: string): Promise<void> {
+    const response = await this.request.patch(
+      `${this.baseUrl}/manage/admin/remove-invited-user`,
+      { data: { user_email: email } }
+    );
+    await this.handleResponse(response, `Failed to cancel invite for ${email}`);
+    this.log(`Cancelled invite for: ${email}`);
+  }
+
+  async inviteUsers(emails: string[]): Promise<void> {
+    const response = await this.put("/manage/admin/users", { emails });
+    await this.handleResponse(response, `Failed to invite users`);
+    this.log(`Invited users: ${emails.join(", ")}`);
+  }
+
+  async setPersonalName(name: string): Promise<void> {
+    const response = await this.request.patch(
+      `${this.baseUrl}/user/personalization`,
+      { data: { name } }
+    );
+    await this.handleResponse(
+      response,
+      `Failed to set personal name to ${name}`
+    );
+    this.log(`Set personal name: ${name}`);
+  }
+
   // === Chat Session Methods ===
 
   /**
@@ -1114,5 +1279,24 @@ export class OnyxApiClient {
       `Failed to delete project ${projectId}`
     );
     this.log(`Deleted project: ${projectId}`);
+  }
+
+  /**
+   * Sets the current user's default app mode preference.
+   *
+   * @param mode - The default mode to persist ("CHAT" or "SEARCH")
+   */
+  async setDefaultAppMode(mode: "CHAT" | "SEARCH"): Promise<void> {
+    const response = await this.request.patch(
+      `${this.baseUrl}/user/default-app-mode`,
+      {
+        data: { default_app_mode: mode },
+      }
+    );
+    await this.handleResponse(
+      response,
+      `Failed to set default app mode to ${mode}`
+    );
+    this.log(`Set default app mode: ${mode}`);
   }
 }

@@ -62,8 +62,10 @@ import { DropdownMenuItemWithTooltip } from "@/components/ui/dropdown-menu-with-
 import { timeAgo } from "@/lib/time";
 import { useStatusChange } from "./useStatusChange";
 import { useReIndexModal } from "./ReIndexModal";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import { SvgSettings } from "@opal/icons";
+import { UserRole } from "@/lib/types";
+import { useUser } from "@/providers/UserProvider";
 // synchronize these validations with the SQLAlchemy connector class until we have a
 // centralized schema for both frontend and backend
 const RefreshFrequencySchema = Yup.object().shape({
@@ -89,6 +91,7 @@ const PAGES_PER_BATCH = 8;
 
 function Main({ ccPairId }: { ccPairId: number }) {
   const router = useRouter();
+  const { user } = useUser();
 
   const {
     data: ccPair,
@@ -155,27 +158,30 @@ function Main({ ccPairId }: { ccPairId: number }) {
     mutate(buildCCPairInfoUrl(ccPairId));
   }, [ccPairId]);
 
-  const shouldConfirmConnectorDeletion = true;
+  const finishConnectorDeletion = useCallback(() => {
+    router.push("/admin/indexing/status");
+  }, [router]);
 
-  const scheduleConnectorDeletion = useCallback(async () => {
+  const scheduleConnectorDeletion = useCallback(() => {
     if (!ccPair) return;
     if (isSchedulingConnectorDeletionRef.current) return;
     isSchedulingConnectorDeletionRef.current = true;
 
-    try {
-      await deleteCCPair(ccPair.connector.id, ccPair.credential.id, () =>
-        mutate(buildCCPairInfoUrl(ccPair.id))
+    deleteCCPair(ccPair.connector.id, ccPair.credential.id).catch((error) => {
+      toast.error(
+        "Failed to schedule deletion of connector - " + error.message
       );
-      refresh();
-    } catch (error) {
-      console.error("Error deleting connector:", error);
-    } finally {
-      setShowDeleteConnectorConfirmModal(false);
-      isSchedulingConnectorDeletionRef.current = false;
-    }
-  }, [ccPair, refresh]);
+    });
+    finishConnectorDeletion();
+  }, [ccPair, finishConnectorDeletion]);
 
   const latestIndexAttempt = indexAttempts?.[0];
+  const canManageInlineFileConnectorFiles =
+    ccPair?.connector.source === "file" &&
+    (ccPair.is_editable_for_current_user ||
+      (user?.role === UserRole.GLOBAL_CURATOR &&
+        ccPair.access_type === "public"));
+
   const isResolvingErrors =
     (latestIndexAttempt?.status === "in_progress" ||
       latestIndexAttempt?.status === "not_started") &&
@@ -184,10 +190,6 @@ function Main({ ccPairId }: { ccPairId: number }) {
     !indexAttemptErrors?.items?.some(
       (error) => error.index_attempt_id === latestIndexAttempt?.id
     );
-
-  const finishConnectorDeletion = useCallback(() => {
-    router.push("/admin/indexing/status?message=connector-deleted");
-  }, [router]);
 
   const handleStatusUpdate = async (
     newStatus: ConnectorCredentialPairStatus
@@ -447,7 +449,7 @@ function Main({ ccPairId }: { ccPairId: number }) {
           {ccPair.is_editable_for_current_user && (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
-                <Button leftIcon={SvgSettings} secondary>
+                <Button prominence="secondary" icon={SvgSettings}>
                   Manage
                 </Button>
               </DropdownMenuTrigger>
@@ -511,13 +513,8 @@ function Main({ ccPairId }: { ccPairId: number }) {
                 )}
                 {!isDeleting && (
                   <DropdownMenuItemWithTooltip
-                    onClick={async () => {
-                      if (shouldConfirmConnectorDeletion) {
-                        setShowDeleteConnectorConfirmModal(true);
-                        return;
-                      }
-
-                      await scheduleConnectorDeletion();
+                    onClick={() => {
+                      setShowDeleteConnectorConfirmModal(true);
                     }}
                     disabled={!statusIsNotCurrentlyActive(ccPair.status)}
                     className="flex items-center gap-x-2 cursor-pointer px-3 py-2 text-red-600 hover:text-red-700 dark:text-red-400 dark:hover:text-red-300"
@@ -617,10 +614,7 @@ function Main({ ccPairId }: { ccPairId: number }) {
           <div className="w-[200px]">
             <div className="text-sm font-medium mb-1">Last Indexed</div>
             <div className="text-sm text-text-default">
-              {timeAgo(
-                indexAttempts?.find((attempt) => attempt.status === "success")
-                  ?.time_started
-              ) ?? "-"}
+              {timeAgo(ccPair?.last_indexed) ?? "-"}
             </div>
           </div>
 
@@ -691,15 +685,14 @@ function Main({ ccPairId }: { ccPairId: number }) {
               />
 
               {/* Inline file management for file connectors */}
-              {ccPair.connector.source === "file" &&
-                ccPair.is_editable_for_current_user && (
-                  <div className="mt-6">
-                    <InlineFileManagement
-                      connectorId={ccPair.connector.id}
-                      onRefresh={refresh}
-                    />
-                  </div>
-                )}
+              {canManageInlineFileConnectorFiles && (
+                <div className="mt-6">
+                  <InlineFileManagement
+                    connectorId={ccPair.connector.id}
+                    onRefresh={refresh}
+                  />
+                </div>
+              )}
             </Card>
           </>
         )}

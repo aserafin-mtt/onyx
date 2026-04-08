@@ -1,4 +1,5 @@
 import abc
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -121,6 +122,7 @@ class VespaDocumentUserFields:
     """
 
     user_projects: list[int] | None = None
+    personas: list[int] | None = None
 
 
 @dataclass
@@ -205,7 +207,7 @@ class Indexable(abc.ABC):
     @abc.abstractmethod
     def index(
         self,
-        chunks: list[DocMetadataAwareIndexChunk],
+        chunks: Iterable[DocMetadataAwareIndexChunk],
         index_batch_params: IndexBatchParams,
     ) -> set[DocumentInsertionRecord]:
         """
@@ -225,8 +227,8 @@ class Indexable(abc.ABC):
         it is done automatically outside of this code.
 
         Parameters:
-        - chunks: Document chunks with all of the information needed for indexing to the document
-                index.
+        - chunks: Document chunks with all of the information needed for
+                indexing to the document index.
         - tenant_id: The tenant id of the user whose chunks are being indexed
         - large_chunks_enabled: Whether large chunks are enabled
 

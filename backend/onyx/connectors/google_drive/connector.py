@@ -8,7 +8,6 @@ from collections.abc import Generator
 from collections.abc import Iterator
 from datetime import datetime
 from enum import Enum
-from functools import partial
 from typing import Any
 from typing import cast
 from typing import Protocol
@@ -309,9 +308,7 @@ class GoogleDriveConnector(
     def primary_admin_email(self) -> str:
         if self._primary_admin_email is None:
             raise RuntimeError(
-                "Primary admin email missing, "
-                "should not call this property "
-                "before calling load_credentials"
+                "Primary admin email missing, should not call this property before calling load_credentials"
             )
         return self._primary_admin_email
 
@@ -319,9 +316,7 @@ class GoogleDriveConnector(
     def google_domain(self) -> str:
         if self._primary_admin_email is None:
             raise RuntimeError(
-                "Primary admin email missing, "
-                "should not call this property "
-                "before calling load_credentials"
+                "Primary admin email missing, should not call this property before calling load_credentials"
             )
         return self._primary_admin_email.split("@")[-1]
 
@@ -329,9 +324,7 @@ class GoogleDriveConnector(
     def creds(self) -> OAuthCredentials | ServiceAccountCredentials:
         if self._creds is None:
             raise RuntimeError(
-                "Creds missing, "
-                "should not call this property "
-                "before calling load_credentials"
+                "Creds missing, should not call this property before calling load_credentials"
             )
         return self._creds
 
@@ -683,8 +676,7 @@ class GoogleDriveConnector(
             if best_folder is None:
                 best_folder = folder
                 logger.debug(
-                    f"Folder {folder_id} has no parents when fetched by {email}, "
-                    f"will try admin to check for parent access"
+                    f"Folder {folder_id} has no parents when fetched by {email}, will try admin to check for parent access"
                 )
 
         if best_folder:
@@ -694,8 +686,7 @@ class GoogleDriveConnector(
             return best_folder
 
         logger.debug(
-            f"All attempts failed to fetch folder {folder_id} "
-            f"(tried {retriever_email} and {self.primary_admin_email})"
+            f"All attempts failed to fetch folder {folder_id} (tried {retriever_email} and {self.primary_admin_email})"
         )
         return None
 
@@ -846,7 +837,6 @@ class GoogleDriveConnector(
         # - the current user's email is in the requested emails
         if curr_stage.stage == DriveRetrievalStage.MY_DRIVE_FILES:
             if self.include_my_drives or user_email in self._requested_my_drive_emails:
-
                 logger.info(
                     f"Getting all files in my drive as '{user_email}. Resuming: {resuming}. "
                     f"Stage completed until: {curr_stage.completed_until}. "
@@ -1105,8 +1095,7 @@ class GoogleDriveConnector(
             for user_email in all_org_emails
         ):
             logger.info(
-                "some users did not complete retrieval, "
-                "returning checkpoint for another run"
+                "some users did not complete retrieval, returning checkpoint for another run"
             )
             return
         checkpoint.completion_stage = DriveRetrievalStage.DONE
@@ -1497,135 +1486,113 @@ class GoogleDriveConnector(
             end=end,
         )
 
-    def _extract_docs_from_google_drive(
+    def _convert_retrieved_files_to_documents(
         self,
+        drive_files_iter: Iterator[RetrievedDriveFile],
         checkpoint: GoogleDriveCheckpoint,
-        start: SecondsSinceUnixEpoch | None,
-        end: SecondsSinceUnixEpoch | None,
         include_permissions: bool,
     ) -> Iterator[Document | ConnectorFailure | HierarchyNode]:
         """
-        Retrieves and converts Google Drive files to documents.
-        Also yields HierarchyNode objects for ancestor folders.
+        Converts retrieved files to documents, yielding HierarchyNode
+        objects for ancestor folders before the converted documents.
         """
-        field_type = (
-            DriveFileFieldType.WITH_PERMISSIONS
-            if include_permissions or self.exclude_domain_link_only
-            else DriveFileFieldType.STANDARD
+        permission_sync_context = (
+            PermissionSyncContext(
+                primary_admin_email=self.primary_admin_email,
+                google_domain=self.google_domain,
+            )
+            if include_permissions
+            else None
         )
 
-        try:
+        files_batch: list[RetrievedDriveFile] = []
+        for retrieved_file in drive_files_iter:
+            if self.exclude_domain_link_only and has_link_only_permission(
+                retrieved_file.drive_file
+            ):
+                continue
+            if retrieved_file.error is None:
+                files_batch.append(retrieved_file)
+                continue
 
-            # Build permission sync context if needed
-            permission_sync_context = (
-                PermissionSyncContext(
-                    primary_admin_email=self.primary_admin_email,
-                    google_domain=self.google_domain,
-                )
-                if include_permissions
-                else None
+            failure_stage = retrieved_file.completion_stage.value
+            failure_message = f"retrieval failure during stage: {failure_stage},"
+            failure_message += f"user: {retrieved_file.user_email},"
+            failure_message += f"parent drive/folder: {retrieved_file.parent_id},"
+            failure_message += f"error: {retrieved_file.error}"
+            logger.error(failure_message)
+            yield ConnectorFailure(
+                failed_entity=EntityFailure(
+                    entity_id=retrieved_file.drive_file.get("id", failure_stage),
+                ),
+                failure_message=failure_message,
+                exception=retrieved_file.error,
             )
 
-            # Prepare a partial function with the credentials and admin email
-            convert_func = partial(
-                convert_drive_item_to_document,
+        new_ancestors = self._get_new_ancestors_for_files(
+            files=files_batch,
+            seen_hierarchy_node_raw_ids=checkpoint.seen_hierarchy_node_raw_ids,
+            fully_walked_hierarchy_node_raw_ids=checkpoint.fully_walked_hierarchy_node_raw_ids,
+            permission_sync_context=permission_sync_context,
+            add_prefix=True,
+        )
+        if new_ancestors:
+            logger.debug(f"Yielding {len(new_ancestors)} new hierarchy nodes")
+            yield from new_ancestors
+
+        func_with_args = [
+            (
+                self._convert_retrieved_file_to_document,
+                (retrieved_file, permission_sync_context),
+            )
+            for retrieved_file in files_batch
+        ]
+        raw_results = cast(
+            list[Document | ConnectorFailure | None],
+            run_functions_tuples_in_parallel(func_with_args, max_workers=8),
+        )
+
+        results: list[Document | ConnectorFailure] = [
+            r for r in raw_results if r is not None
+        ]
+        logger.debug(f"batch has {len(results)} docs or failures")
+        yield from results
+
+        checkpoint.retrieved_folder_and_drive_ids = self._retrieved_folder_and_drive_ids
+
+    def _convert_retrieved_file_to_document(
+        self,
+        retrieved_file: RetrievedDriveFile,
+        permission_sync_context: PermissionSyncContext | None,
+    ) -> Document | ConnectorFailure | None:
+        """
+        Converts a single retrieved file to a document.
+        """
+        try:
+            return convert_drive_item_to_document(
                 self.creds,
                 self.allow_images,
                 self.size_threshold,
                 permission_sync_context,
+                [retrieved_file.user_email, self.primary_admin_email]
+                + get_file_owners(retrieved_file.drive_file, self.primary_admin_email),
+                retrieved_file.drive_file,
             )
-            # Fetch files in batches
-            batches_complete = 0
-            files_batch: list[RetrievedDriveFile] = []
-
-            def _yield_batch(
-                files_batch: list[RetrievedDriveFile],
-            ) -> Iterator[Document | ConnectorFailure | HierarchyNode]:
-                nonlocal batches_complete
-
-                # First, yield any new ancestor hierarchy nodes
-                new_ancestors = self._get_new_ancestors_for_files(
-                    files=files_batch,
-                    seen_hierarchy_node_raw_ids=checkpoint.seen_hierarchy_node_raw_ids,
-                    fully_walked_hierarchy_node_raw_ids=checkpoint.fully_walked_hierarchy_node_raw_ids,
-                    permission_sync_context=permission_sync_context,
-                    add_prefix=True,  # Indexing path - prefix here
-                )
-                if new_ancestors:
-                    logger.debug(
-                        f"Yielding {len(new_ancestors)} new hierarchy nodes for batch {batches_complete}"
-                    )
-                    yield from new_ancestors
-
-                # Process the batch using run_functions_tuples_in_parallel
-                func_with_args = [
-                    (
-                        convert_func,
-                        (
-                            [file.user_email, self.primary_admin_email]
-                            + get_file_owners(
-                                file.drive_file, self.primary_admin_email
-                            ),
-                            file.drive_file,
-                        ),
-                    )
-                    for file in files_batch
-                ]
-                results = cast(
-                    list[Document | ConnectorFailure | None],
-                    run_functions_tuples_in_parallel(func_with_args, max_workers=8),
-                )
-                logger.debug(
-                    f"finished processing batch {batches_complete} with {len(results)} results"
-                )
-
-                docs_and_failures = [result for result in results if result is not None]
-                logger.debug(
-                    f"batch {batches_complete} has {len(docs_and_failures)} docs or failures"
-                )
-
-                if docs_and_failures:
-                    yield from docs_and_failures
-                    batches_complete += 1
-                logger.debug(f"finished yielding batch {batches_complete}")
-
-            for retrieved_file in self._fetch_drive_items(
-                field_type=field_type,
-                checkpoint=checkpoint,
-                start=start,
-                end=end,
-            ):
-                if self.exclude_domain_link_only and has_link_only_permission(
-                    retrieved_file.drive_file
-                ):
-                    continue
-                if retrieved_file.error is None:
-                    files_batch.append(retrieved_file)
-                    continue
-
-                # handle retrieval errors
-                failure_stage = retrieved_file.completion_stage.value
-                failure_message = f"retrieval failure during stage: {failure_stage},"
-                failure_message += f"user: {retrieved_file.user_email},"
-                failure_message += f"parent drive/folder: {retrieved_file.parent_id},"
-                failure_message += f"error: {retrieved_file.error}"
-                logger.error(failure_message)
-                yield ConnectorFailure(
-                    failed_entity=EntityFailure(
-                        entity_id=failure_stage,
-                    ),
-                    failure_message=failure_message,
-                    exception=retrieved_file.error,
-                )
-
-            yield from _yield_batch(files_batch)
-            checkpoint.retrieved_folder_and_drive_ids = (
-                self._retrieved_folder_and_drive_ids
-            )
-
         except Exception as e:
-            logger.exception(f"Error extracting documents from Google Drive: {e}")
-            raise e
+            logger.exception(
+                f"Error extracting document: "
+                f"{retrieved_file.drive_file.get('name')} from Google Drive"
+            )
+            return ConnectorFailure(
+                failed_entity=EntityFailure(
+                    entity_id=retrieved_file.drive_file.get("id", "unknown"),
+                ),
+                failure_message=(
+                    f"Error extracting document: "
+                    f"{retrieved_file.drive_file.get('name')}"
+                ),
+                exception=e,
+            )
 
     def _load_from_checkpoint(
         self,
@@ -1649,8 +1616,19 @@ class GoogleDriveConnector(
         checkpoint = copy.deepcopy(checkpoint)
         self._retrieved_folder_and_drive_ids = checkpoint.retrieved_folder_and_drive_ids
         try:
-            yield from self._extract_docs_from_google_drive(
-                checkpoint, start, end, include_permissions
+            field_type = (
+                DriveFileFieldType.WITH_PERMISSIONS
+                if include_permissions or self.exclude_domain_link_only
+                else DriveFileFieldType.STANDARD
+            )
+            drive_files_iter = self._fetch_drive_items(
+                field_type=field_type,
+                checkpoint=checkpoint,
+                start=start,
+                end=end,
+            )
+            yield from self._convert_retrieved_files_to_documents(
+                drive_files_iter, checkpoint, include_permissions
             )
         except Exception as e:
             if MISSING_SCOPES_ERROR_STR in str(e):
@@ -1722,6 +1700,7 @@ class GoogleDriveConnector(
                         primary_admin_email=self.primary_admin_email,
                         google_domain=self.google_domain,
                     ),
+                    retriever_email=file.user_email,
                 ):
                     slim_batch.append(doc)
 
@@ -1790,8 +1769,7 @@ class GoogleDriveConnector(
 
         if self._primary_admin_email is None:
             raise ConnectorValidationError(
-                "Primary admin email not found in credentials. "
-                "Ensure DB_CREDENTIALS_PRIMARY_ADMIN_KEY is set."
+                "Primary admin email not found in credentials. Ensure DB_CREDENTIALS_PRIMARY_ADMIN_KEY is set."
             )
 
         try:
@@ -1824,8 +1802,7 @@ class GoogleDriveConnector(
             # Check for scope-related hints from the error message
             if MISSING_SCOPES_ERROR_STR in str(e):
                 raise InsufficientPermissionsError(
-                    "Google Drive credentials are missing required scopes. "
-                    f"{ONYX_SCOPE_INSTRUCTIONS}"
+                    f"Google Drive credentials are missing required scopes. {ONYX_SCOPE_INSTRUCTIONS}"
                 )
             raise ConnectorValidationError(
                 f"Unexpected error during Google Drive validation: {e}"
@@ -1968,9 +1945,11 @@ if __name__ == "__main__":
         ):
             if num % 200 == 0:
                 f.write(f"Processed {num} files\n")
-                f.write(f"Max file size: {max_fsize/1000_000:.2f} MB\n")
+                f.write(f"Max file size: {max_fsize / 1000_000:.2f} MB\n")
                 f.write(f"Time so far: {time.time() - start_time:.2f} seconds\n")
-                f.write(f"Docs per minute: {num/(time.time() - start_time)*60:.2f}\n")
+                f.write(
+                    f"Docs per minute: {num / (time.time() - start_time) * 60:.2f}\n"
+                )
                 biggest_fsize = max(biggest_fsize, max_fsize)
                 max_fsize = 0
             if isinstance(doc_or_failure, Document):
@@ -1978,5 +1957,5 @@ if __name__ == "__main__":
             elif isinstance(doc_or_failure, ConnectorFailure):
                 num_errors += 1
         print(f"Num errors: {num_errors}")
-        print(f"Biggest file size: {biggest_fsize/1000_000:.2f} MB")
+        print(f"Biggest file size: {biggest_fsize / 1000_000:.2f} MB")
         print(f"Time taken: {time.time() - start_time:.2f} seconds")

@@ -12,6 +12,11 @@ services:
   api_server:
     ports:
       - "8080:8080"
+    deploy:
+      resources:
+        limits:
+          cpus: "${API_SERVER_CPU_LIMIT:-0}"
+          memory: "${API_SERVER_MEM_LIMIT:-0}"
 
   # Uncomment the block below to enable the MCP server for Onyx.
   # mcp_server:
@@ -38,6 +43,11 @@ services:
   opensearch:
     ports:
       - "9200:9200"
+    # Rootless Docker can reject the base OpenSearch ulimit settings, so clear
+    # the inherited block entirely in the dev override.
+    ulimits: !reset null
+    environment:
+      - bootstrap.memory_lock=false
 
   inference_model_server:
     ports:

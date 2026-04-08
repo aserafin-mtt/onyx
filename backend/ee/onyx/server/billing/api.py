@@ -26,11 +26,9 @@ import asyncio
 import httpx
 from fastapi import APIRouter
 from fastapi import Depends
-from fastapi import HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from ee.onyx.auth.users import current_admin_user
 from ee.onyx.db.license import get_license
 from ee.onyx.db.license import get_used_seats
 from ee.onyx.server.billing.models import BillingInformationResponse
@@ -42,7 +40,6 @@ from ee.onyx.server.billing.models import SeatUpdateRequest
 from ee.onyx.server.billing.models import SeatUpdateResponse
 from ee.onyx.server.billing.models import StripePublishableKeyResponse
 from ee.onyx.server.billing.models import SubscriptionStatusResponse
-from ee.onyx.server.billing.service import BillingServiceError
 from ee.onyx.server.billing.service import (
     create_checkout_session as create_checkout_service,
 )
@@ -53,11 +50,15 @@ from ee.onyx.server.billing.service import (
     get_billing_information as get_billing_service,
 )
 from ee.onyx.server.billing.service import update_seat_count as update_seat_service
+from onyx.auth.permissions import require_permission
 from onyx.auth.users import User
 from onyx.configs.app_configs import STRIPE_PUBLISHABLE_KEY_OVERRIDE
 from onyx.configs.app_configs import STRIPE_PUBLISHABLE_KEY_URL
 from onyx.configs.app_configs import WEB_DOMAIN
 from onyx.db.engine.sql_engine import get_session
+from onyx.db.enums import Permission
+from onyx.error_handling.error_codes import OnyxErrorCode
+from onyx.error_handling.exceptions import OnyxError
 from onyx.redis.redis_pool import get_shared_redis_client
 from onyx.utils.logger import setup_logger
 from shared_configs.configs import MULTI_TENANT
@@ -147,7 +148,7 @@ def _get_tenant_id() -> str | None:
 @router.post("/create-checkout-session")
 async def create_checkout_session(
     request: CreateCheckoutSessionRequest | None = None,
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> CreateCheckoutSessionResponse:
     """Create a Stripe checkout session for new subscription or renewal.
@@ -169,32 +170,29 @@ async def create_checkout_session(
     if seats is not None:
         used_seats = get_used_seats(tenant_id)
         if seats < used_seats:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Cannot subscribe with fewer seats than current usage. "
+            raise OnyxError(
+                OnyxErrorCode.VALIDATION_ERROR,
+                f"Cannot subscribe with fewer seats than current usage. "
                 f"You have {used_seats} active users/integrations but requested {seats} seats.",
             )
 
     # Build redirect URL for after checkout completion
     redirect_url = f"{WEB_DOMAIN}/admin/billing?checkout=success"
 
-    try:
-        return await create_checkout_service(
-            billing_period=billing_period,
-            seats=seats,
-            email=email,
-            license_data=license_data,
-            redirect_url=redirect_url,
-            tenant_id=tenant_id,
-        )
-    except BillingServiceError as e:
-        raise HTTPException(status_code=e.status_code, detail=e.message)
+    return await create_checkout_service(
+        billing_period=billing_period,
+        seats=seats,
+        email=email,
+        license_data=license_data,
+        redirect_url=redirect_url,
+        tenant_id=tenant_id,
+    )
 
 
 @router.post("/create-customer-portal-session")
 async def create_customer_portal_session(
     request: CreateCustomerPortalSessionRequest | None = None,
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> CreateCustomerPortalSessionResponse:
     """Create a Stripe customer portal session for managing subscription.
@@ -206,23 +204,20 @@ async def create_customer_portal_session(
 
     # Self-hosted requires license
     if not MULTI_TENANT and not license_data:
-        raise HTTPException(status_code=400, detail="No license found")
+        raise OnyxError(OnyxErrorCode.VALIDATION_ERROR, "No license found")
 
     return_url = request.return_url if request else f"{WEB_DOMAIN}/admin/billing"
 
-    try:
-        return await create_portal_service(
-            license_data=license_data,
-            return_url=return_url,
-            tenant_id=tenant_id,
-        )
-    except BillingServiceError as e:
-        raise HTTPException(status_code=e.status_code, detail=e.message)
+    return await create_portal_service(
+        license_data=license_data,
+        return_url=return_url,
+        tenant_id=tenant_id,
+    )
 
 
 @router.get("/billing-information")
 async def get_billing_information(
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> BillingInformationResponse | SubscriptionStatusResponse:
     """Get billing information for the current subscription.
@@ -240,9 +235,9 @@ async def get_billing_information(
 
     # Check circuit breaker (self-hosted only)
     if _is_billing_circuit_open():
-        raise HTTPException(
-            status_code=503,
-            detail="Stripe connection temporarily disabled. Click 'Connect to Stripe' to retry.",
+        raise OnyxError(
+            OnyxErrorCode.SERVICE_UNAVAILABLE,
+            "Stripe connection temporarily disabled. Click 'Connect to Stripe' to retry.",
         )
 
     try:
@@ -250,17 +245,21 @@ async def get_billing_information(
             license_data=license_data,
             tenant_id=tenant_id,
         )
-    except BillingServiceError as e:
+    except OnyxError as e:
         # Open circuit breaker on connection failures (self-hosted only)
-        if e.status_code in (502, 503, 504):
+        if e.status_code in (
+            OnyxErrorCode.BAD_GATEWAY.status_code,
+            OnyxErrorCode.SERVICE_UNAVAILABLE.status_code,
+            OnyxErrorCode.GATEWAY_TIMEOUT.status_code,
+        ):
             _open_billing_circuit()
-        raise HTTPException(status_code=e.status_code, detail=e.message)
+        raise
 
 
 @router.post("/seats/update")
 async def update_seats(
     request: SeatUpdateRequest,
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     db_session: Session = Depends(get_session),
 ) -> SeatUpdateResponse:
     """Update the seat count for the current subscription.
@@ -274,31 +273,25 @@ async def update_seats(
 
     # Self-hosted requires license
     if not MULTI_TENANT and not license_data:
-        raise HTTPException(status_code=400, detail="No license found")
+        raise OnyxError(OnyxErrorCode.VALIDATION_ERROR, "No license found")
 
     # Validate that new seat count is not less than current used seats
     used_seats = get_used_seats(tenant_id)
     if request.new_seat_count < used_seats:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Cannot reduce seats below current usage. "
+        raise OnyxError(
+            OnyxErrorCode.VALIDATION_ERROR,
+            f"Cannot reduce seats below current usage. "
             f"You have {used_seats} active users/integrations but requested {request.new_seat_count} seats.",
         )
 
-    try:
-        result = await update_seat_service(
-            new_seat_count=request.new_seat_count,
-            license_data=license_data,
-            tenant_id=tenant_id,
-        )
-
-        # Note: Don't store license here - the control plane may still be processing
-        # the subscription update. The frontend should call /license/claim after a
-        # short delay to get the freshly generated license.
-
-        return result
-    except BillingServiceError as e:
-        raise HTTPException(status_code=e.status_code, detail=e.message)
+    # Note: Don't store license here - the control plane may still be processing
+    # the subscription update. The frontend should call /license/claim after a
+    # short delay to get the freshly generated license.
+    return await update_seat_service(
+        new_seat_count=request.new_seat_count,
+        license_data=license_data,
+        tenant_id=tenant_id,
+    )
 
 
 @router.get("/stripe-publishable-key")
@@ -329,18 +322,18 @@ async def get_stripe_publishable_key() -> StripePublishableKeyResponse:
         if STRIPE_PUBLISHABLE_KEY_OVERRIDE:
             key = STRIPE_PUBLISHABLE_KEY_OVERRIDE.strip()
             if not key.startswith("pk_"):
-                raise HTTPException(
-                    status_code=500,
-                    detail="Invalid Stripe publishable key format",
+                raise OnyxError(
+                    OnyxErrorCode.INTERNAL_ERROR,
+                    "Invalid Stripe publishable key format",
                 )
             _stripe_publishable_key_cache = key
             return StripePublishableKeyResponse(publishable_key=key)
 
         # Fall back to S3 bucket
         if not STRIPE_PUBLISHABLE_KEY_URL:
-            raise HTTPException(
-                status_code=500,
-                detail="Stripe publishable key is not configured",
+            raise OnyxError(
+                OnyxErrorCode.INTERNAL_ERROR,
+                "Stripe publishable key is not configured",
             )
 
         try:
@@ -351,17 +344,17 @@ async def get_stripe_publishable_key() -> StripePublishableKeyResponse:
 
                 # Validate key format
                 if not key.startswith("pk_"):
-                    raise HTTPException(
-                        status_code=500,
-                        detail="Invalid Stripe publishable key format",
+                    raise OnyxError(
+                        OnyxErrorCode.INTERNAL_ERROR,
+                        "Invalid Stripe publishable key format",
                     )
 
                 _stripe_publishable_key_cache = key
                 return StripePublishableKeyResponse(publishable_key=key)
         except httpx.HTTPError:
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to fetch Stripe publishable key",
+            raise OnyxError(
+                OnyxErrorCode.INTERNAL_ERROR,
+                "Failed to fetch Stripe publishable key",
             )
 
 
@@ -372,7 +365,7 @@ class ResetConnectionResponse(BaseModel):
 
 @router.post("/reset-connection")
 async def reset_stripe_connection(
-    _: User = Depends(current_admin_user),
+    _: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
 ) -> ResetConnectionResponse:
     """Reset the Stripe connection circuit breaker.
 

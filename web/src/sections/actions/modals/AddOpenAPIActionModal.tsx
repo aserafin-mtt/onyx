@@ -1,8 +1,8 @@
 "use client";
 
+import { markdown } from "@opal/utils";
 import Link from "next/link";
 import Modal from "@/refresh-components/Modal";
-import Button from "@/refresh-components/buttons/Button";
 import Text from "@/refresh-components/texts/Text";
 import * as InputLayouts from "@/layouts/input-layouts";
 import InputTextAreaField from "@/refresh-components/form/InputTextAreaField";
@@ -10,7 +10,8 @@ import SimpleTooltip from "@/refresh-components/SimpleTooltip";
 import Separator from "@/refresh-components/Separator";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import CopyIconButton from "@/refresh-components/buttons/CopyIconButton";
-import { Button as OpalButton } from "@opal/components";
+import { Button } from "@opal/components";
+import { Hoverable } from "@opal/core";
 import { MethodSpec, ToolSnapshot } from "@/lib/tools/interfaces";
 import {
   validateToolDefinition,
@@ -238,54 +239,44 @@ function FormContent({
         <InputLayouts.Vertical
           name="definition"
           title="OpenAPI Schema Definition"
-          subDescription={
-            <>
-              Specify an OpenAPI schema that defines the APIs you want to make
-              available as part of this action. Learn more about{" "}
-              <span className="inline-flex">
-                <SimpleTooltip
-                  tooltip={`Open ${DOCS_ADMINS_PATH}/actions/openapi`}
-                  side="top"
-                >
-                  <Link
-                    href={`${DOCS_ADMINS_PATH}/actions/openapi`}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="underline"
-                  >
-                    OpenAPI actions
-                  </Link>
-                </SimpleTooltip>
-              </span>
-              .
-            </>
-          }
+          subDescription={markdown(
+            `Specify an OpenAPI schema that defines the APIs you want to make available as part of this action. Learn more about [OpenAPI actions](${DOCS_ADMINS_PATH}/actions/openapi).`
+          )}
         >
-          <div className="group/DefinitionTextAreaField relative w-full">
-            {values.definition.trim() && (
-              <div className="invisible group-hover/DefinitionTextAreaField:visible absolute z-[100000] top-2 right-2 bg-background-tint-00">
-                <CopyIconButton
-                  prominence="tertiary"
-                  size="sm"
-                  getCopyText={() => values.definition}
-                  tooltip="Copy definition"
-                />
-                <OpalButton
-                  prominence="tertiary"
-                  size="sm"
-                  icon={SvgBracketCurly}
-                  tooltip="Format definition"
-                  onClick={handleFormat}
-                />
-              </div>
-            )}
-            <InputTextAreaField
-              name="definition"
-              rows={14}
-              placeholder="Enter your OpenAPI schema here"
-              className="font-main-ui-mono"
-            />
-          </div>
+          <Hoverable.Root group="definitionField" widthVariant="full">
+            <div className="relative w-full">
+              {values.definition.trim() && (
+                <div className="absolute z-[100000] top-2 right-2 bg-background-tint-00">
+                  <Hoverable.Item
+                    group="definitionField"
+                    variant="opacity-on-hover"
+                  >
+                    <div className="flex">
+                      <CopyIconButton
+                        prominence="tertiary"
+                        size="sm"
+                        getCopyText={() => values.definition}
+                        tooltip="Copy definition"
+                      />
+                      <Button
+                        prominence="tertiary"
+                        size="sm"
+                        icon={SvgBracketCurly}
+                        tooltip="Format definition"
+                        onClick={handleFormat}
+                      />
+                    </div>
+                  </Hoverable.Item>
+                </div>
+              )}
+              <InputTextAreaField
+                name="definition"
+                rows={14}
+                placeholder="Enter your OpenAPI schema here"
+                className="font-main-ui-mono"
+              />
+            </div>
+          </Hoverable.Root>
         </InputLayouts.Vertical>
 
         <Separator noPadding />
@@ -363,7 +354,7 @@ function FormContent({
               alignItems="center"
               width="fit"
             >
-              <OpalButton
+              <Button
                 icon={SvgUnplug}
                 prominence="tertiary"
                 type="button"
@@ -376,10 +367,10 @@ function FormContent({
                 }}
               />
               <Button
-                secondary
+                disabled={!onEditAuthentication}
+                prominence="secondary"
                 type="button"
                 onClick={handleEditAuthenticationClick}
-                disabled={!onEditAuthentication}
               >
                 Edit Configs
               </Button>
@@ -390,15 +381,14 @@ function FormContent({
 
       <Modal.Footer>
         <Button
-          main
-          secondary
+          disabled={isSubmitting}
+          prominence="secondary"
           type="button"
           onClick={handleClose}
-          disabled={isSubmitting}
         >
           Cancel
         </Button>
-        <Button main primary type="submit" disabled={isSubmitting || !dirty}>
+        <Button disabled={isSubmitting || !dirty} type="submit">
           {primaryButtonLabel}
         </Button>
       </Modal.Footer>
@@ -459,8 +449,14 @@ export default function AddOpenAPIActionModal({
           name?: string;
           description?: string;
           definition: Record<string, any>;
+          custom_headers?: { key: string; value: string }[];
+          passthrough_auth?: boolean;
+          oauth_config_id?: number | null;
         } = {
           definition: parsedDefinition,
+          custom_headers: existingTool.custom_headers,
+          passthrough_auth: existingTool.passthrough_auth,
+          oauth_config_id: existingTool.oauth_config_id,
         };
 
         if (derivedName) {

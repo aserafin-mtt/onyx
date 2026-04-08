@@ -8,6 +8,7 @@ from onyx.configs.constants import MessageType
 from onyx.context.search.models import SearchDoc
 from onyx.file_store.models import InMemoryChatFile
 from onyx.server.query_and_chat.models import MessageResponseIDInfo
+from onyx.server.query_and_chat.models import MultiModelMessageResponseIDInfo
 from onyx.server.query_and_chat.streaming_models import CitationInfo
 from onyx.server.query_and_chat.streaming_models import GeneratedImage
 from onyx.server.query_and_chat.streaming_models import Packet
@@ -31,18 +32,17 @@ class CustomToolResponse(BaseModel):
     tool_name: str
 
 
-class ProjectSearchConfig(BaseModel):
-    """Configuration for search tool availability in project context."""
-
-    search_usage: SearchToolUsage
-    disable_forced_tool: bool
-
-
 class CreateChatSessionID(BaseModel):
     chat_session_id: UUID
 
 
-AnswerStreamPart = Packet | MessageResponseIDInfo | StreamingError | CreateChatSessionID
+AnswerStreamPart = (
+    Packet
+    | MessageResponseIDInfo
+    | MultiModelMessageResponseIDInfo
+    | StreamingError
+    | CreateChatSessionID
+)
 
 AnswerStream = Iterator[AnswerStreamPart]
 
@@ -132,8 +132,8 @@ class ChatMessageSimple(BaseModel):
     file_id: str | None = None
 
 
-class ProjectFileMetadata(BaseModel):
-    """Metadata for a project file to enable citation support."""
+class ContextFileMetadata(BaseModel):
+    """Metadata for a context-injected file to enable citation support."""
 
     file_id: str
     filename: str
@@ -167,18 +167,26 @@ class ChatHistoryResult(BaseModel):
     all_injected_file_metadata: dict[str, FileToolMetadata]
 
 
-class ExtractedProjectFiles(BaseModel):
-    project_file_texts: list[str]
-    project_image_files: list[ChatLoadedFile]
-    project_as_filter: bool
+class ExtractedContextFiles(BaseModel):
+    """Result of attempting to load user files (from a project or persona) into context."""
+
+    file_texts: list[str]
+    image_files: list[ChatLoadedFile]
+    use_as_search_filter: bool
     total_token_count: int
-    # Metadata for project files to enable citations
-    project_file_metadata: list[ProjectFileMetadata]
-    # None if not a project
-    project_uncapped_token_count: int | None
     # Lightweight metadata for files exposed via FileReaderTool
-    # (populated when files don't fit in context and vector DB is disabled)
+    # (populated when files don't fit in context and vector DB is disabled).
+    file_metadata: list[ContextFileMetadata]
+    uncapped_token_count: int | None
     file_metadata_for_tool: list[FileToolMetadata] = []
+
+
+class SearchParams(BaseModel):
+    """Resolved search filter IDs and search-tool usage for a chat turn."""
+
+    project_id_filter: int | None
+    persona_id_filter: int | None
+    search_usage: SearchToolUsage
 
 
 class LlmStepResult(BaseModel):

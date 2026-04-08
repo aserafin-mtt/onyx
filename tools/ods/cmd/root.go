@@ -41,6 +41,7 @@ func NewRootCommand() *cobra.Command {
 	cmd.PersistentFlags().BoolVar(&opts.Debug, "debug", false, "run in debug mode")
 
 	// Add subcommands
+	cmd.AddCommand(NewBackendCommand())
 	cmd.AddCommand(NewCheckLazyImportsCommand())
 	cmd.AddCommand(NewCherryPickCommand())
 	cmd.AddCommand(NewDBCommand())
@@ -50,6 +51,11 @@ func NewRootCommand() *cobra.Command {
 	cmd.AddCommand(NewPullCommand())
 	cmd.AddCommand(NewRunCICommand())
 	cmd.AddCommand(NewScreenshotDiffCommand())
+	cmd.AddCommand(NewDesktopCommand())
+	cmd.AddCommand(NewWebCommand())
+	cmd.AddCommand(NewLatestStableTagCommand())
+	cmd.AddCommand(NewWhoisCommand())
+	cmd.AddCommand(NewTraceCommand())
 
 	return cmd
 }

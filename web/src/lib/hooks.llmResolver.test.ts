@@ -2,8 +2,8 @@ import {
   getDefaultLlmDescriptor,
   getValidLlmDescriptorForProviders,
 } from "@/lib/hooks";
-import { structureValue } from "@/lib/llm/utils";
-import { LLMProviderDescriptor } from "@/app/admin/configuration/llm/interfaces";
+import { structureValue } from "@/lib/llmConfig/utils";
+import { LLMProviderDescriptor } from "@/interfaces/llm";
 import { makeProvider } from "@tests/setup/llmProviderTestUtils";
 
 describe("LLM resolver helpers", () => {
@@ -11,29 +11,30 @@ describe("LLM resolver helpers", () => {
     const sharedModel = "shared-runtime-model";
     const providers: LLMProviderDescriptor[] = [
       makeProvider({
+        id: 1,
         name: "OpenAI Provider",
         provider: "openai",
-        default_model_name: sharedModel,
-        is_default_provider: true,
         model_configurations: [
           {
             name: sharedModel,
             is_visible: true,
             max_input_tokens: null,
             supports_image_input: false,
+            supports_reasoning: false,
           },
         ],
       }),
       makeProvider({
+        id: 2,
         name: "Anthropic Provider",
         provider: "anthropic",
-        default_model_name: sharedModel,
         model_configurations: [
           {
             name: sharedModel,
             is_visible: true,
             max_input_tokens: null,
             supports_image_input: false,
+            supports_reasoning: false,
           },
         ],
       }),
@@ -54,29 +55,30 @@ describe("LLM resolver helpers", () => {
   test("falls back to default provider when model is unavailable", () => {
     const providers: LLMProviderDescriptor[] = [
       makeProvider({
+        id: 10,
         name: "Default OpenAI",
         provider: "openai",
-        default_model_name: "gpt-4o-mini",
-        is_default_provider: true,
         model_configurations: [
           {
             name: "gpt-4o-mini",
             is_visible: true,
             max_input_tokens: null,
             supports_image_input: true,
+            supports_reasoning: false,
           },
         ],
       }),
       makeProvider({
+        id: 20,
         name: "Anthropic Backup",
         provider: "anthropic",
-        default_model_name: "claude-3-5-sonnet",
         model_configurations: [
           {
             name: "claude-3-5-sonnet",
             is_visible: true,
             max_input_tokens: null,
             supports_image_input: true,
+            supports_reasoning: false,
           },
         ],
       }),
@@ -94,33 +96,81 @@ describe("LLM resolver helpers", () => {
     });
   });
 
+  test("prefers provider by name when multiple share the same type", () => {
+    const providers: LLMProviderDescriptor[] = [
+      makeProvider({
+        id: 1,
+        name: "Anthropic",
+        provider: "anthropic",
+        model_configurations: [
+          {
+            name: "claude-sonnet-4-5",
+            is_visible: true,
+            max_input_tokens: null,
+            supports_image_input: false,
+            supports_reasoning: false,
+          },
+        ],
+      }),
+      makeProvider({
+        id: 2,
+        name: "PersonalAnthropicToken",
+        provider: "anthropic",
+        model_configurations: [
+          {
+            name: "claude-sonnet-4-5",
+            is_visible: true,
+            max_input_tokens: null,
+            supports_image_input: false,
+            supports_reasoning: false,
+          },
+        ],
+      }),
+    ];
+
+    const descriptor = getValidLlmDescriptorForProviders(
+      structureValue(
+        "PersonalAnthropicToken",
+        "anthropic",
+        "claude-sonnet-4-5"
+      ),
+      providers
+    );
+
+    expect(descriptor).toEqual({
+      name: "PersonalAnthropicToken",
+      provider: "anthropic",
+      modelName: "claude-sonnet-4-5",
+    });
+  });
+
   test("uses first provider with models when no explicit default exists", () => {
     const providers: LLMProviderDescriptor[] = [
       makeProvider({
+        id: 30,
         name: "First Provider",
         provider: "openai",
-        default_model_name: "gpt-first",
-        is_default_provider: false,
         model_configurations: [
           {
             name: "gpt-first",
             is_visible: true,
             max_input_tokens: null,
             supports_image_input: false,
+            supports_reasoning: false,
           },
         ],
       }),
       makeProvider({
+        id: 40,
         name: "Second Provider",
         provider: "anthropic",
-        default_model_name: "claude-second",
-        is_default_provider: false,
         model_configurations: [
           {
             name: "claude-second",
             is_visible: true,
             max_input_tokens: null,
             supports_image_input: false,
+            supports_reasoning: false,
           },
         ],
       }),

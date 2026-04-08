@@ -160,7 +160,9 @@ POSTGRES_DEFAULT_SCHEMA = (
 DEFAULT_REDIS_PREFIX = os.environ.get("DEFAULT_REDIS_PREFIX") or "default"
 
 
-async def async_return_default_schema(*args: Any, **kwargs: Any) -> str:  # noqa: ARG001
+async def async_return_default_schema(
+    *args: Any, **kwargs: Any  # noqa: ARG001
+) -> str:  # noqa: ARG001
     return POSTGRES_DEFAULT_SCHEMA
 
 
@@ -186,25 +188,6 @@ IGNORED_SYNCING_TENANT_LIST = (
         if tenant.strip()
     ]
     if IGNORED_SYNCING_TENANT_IDS
-    else None
-)
-
-# Global flag to skip userfile threshold for all users/tenants
-SKIP_USERFILE_THRESHOLD = (
-    os.environ.get("SKIP_USERFILE_THRESHOLD", "").lower() == "true"
-)
-
-# Comma-separated list of specific tenant IDs to skip threshold (multi-tenant only)
-SKIP_USERFILE_THRESHOLD_TENANT_IDS = os.environ.get(
-    "SKIP_USERFILE_THRESHOLD_TENANT_IDS"
-)
-SKIP_USERFILE_THRESHOLD_TENANT_LIST = (
-    [
-        tenant.strip()
-        for tenant in SKIP_USERFILE_THRESHOLD_TENANT_IDS.split(",")
-        if tenant.strip()
-    ]
-    if SKIP_USERFILE_THRESHOLD_TENANT_IDS
     else None
 )
 
@@ -243,12 +226,12 @@ USAGE_LIMIT_CHUNKS_INDEXED_PAID = int(
 )
 
 # Per-week API calls using API keys or Personal Access Tokens
-USAGE_LIMIT_API_CALLS_TRIAL = int(os.environ.get("USAGE_LIMIT_API_CALLS_TRIAL", "400"))
+USAGE_LIMIT_API_CALLS_TRIAL = int(os.environ.get("USAGE_LIMIT_API_CALLS_TRIAL", "0"))
 USAGE_LIMIT_API_CALLS_PAID = int(os.environ.get("USAGE_LIMIT_API_CALLS_PAID", "40000"))
 
 # Per-week non-streaming API calls (more expensive, so lower limits)
 USAGE_LIMIT_NON_STREAMING_CALLS_TRIAL = int(
-    os.environ.get("USAGE_LIMIT_NON_STREAMING_CALLS_TRIAL", "80")
+    os.environ.get("USAGE_LIMIT_NON_STREAMING_CALLS_TRIAL", "0")
 )
 USAGE_LIMIT_NON_STREAMING_CALLS_PAID = int(
     os.environ.get("USAGE_LIMIT_NON_STREAMING_CALLS_PAID", "160")

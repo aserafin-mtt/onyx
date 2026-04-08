@@ -1,12 +1,12 @@
 import time
-from collections.abc import Generator
+from datetime import datetime
+from datetime import timezone
 
 import pytest
 
 from onyx.connectors.models import HierarchyNode
 from onyx.connectors.models import SlimDocument
 from onyx.connectors.slack.connector import SlackConnector
-from onyx.utils.variable_functionality import global_version
 from tests.daily.connectors.utils import load_all_from_connector
 
 
@@ -19,16 +19,11 @@ PRIVATE_CHANNEL_USERS = [
     "test_user_2@onyx-test.com",
 ]
 
+# Predates any test workspace messages, so the result set should match
+# the "no start time" case while exercising the oldest= parameter.
+OLDEST_TS_2016 = datetime(2016, 1, 1, tzinfo=timezone.utc).timestamp()
 
-@pytest.fixture(autouse=True)
-def set_ee_on() -> Generator[None, None, None]:
-    """Need EE to be enabled for these tests to work since
-    perm syncing is a an EE-only feature."""
-    global_version.set_ee()
-
-    yield
-
-    global_version._is_ee = False
+pytestmark = pytest.mark.usefixtures("enable_ee")
 
 
 @pytest.mark.parametrize(
@@ -116,15 +111,17 @@ def test_load_from_checkpoint_access__private_channel(
     ],
     indirect=True,
 )
+@pytest.mark.parametrize("start_ts", [None, OLDEST_TS_2016])
 def test_slim_documents_access__public_channel(
     slack_connector: SlackConnector,
+    start_ts: float | None,
 ) -> None:
     """Test that retrieve_all_slim_docs_perm_sync returns correct access information for slim documents."""
     if not slack_connector.client:
         raise RuntimeError("Web client must be defined")
 
     slim_docs_generator = slack_connector.retrieve_all_slim_docs_perm_sync(
-        start=0.0,
+        start=start_ts,
         end=time.time(),
     )
 
@@ -160,7 +157,7 @@ def test_slim_documents_access__private_channel(
         raise RuntimeError("Web client must be defined")
 
     slim_docs_generator = slack_connector.retrieve_all_slim_docs_perm_sync(
-        start=0.0,
+        start=None,
         end=time.time(),
     )
 

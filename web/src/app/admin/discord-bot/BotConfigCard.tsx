@@ -4,7 +4,7 @@ import { useState } from "react";
 import { Section } from "@/layouts/general-layouts";
 import Text from "@/refresh-components/texts/Text";
 import Card from "@/refresh-components/cards/Card";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import { Badge } from "@/components/ui/badge";
 import PasswordInputTypeIn from "@/refresh-components/inputs/PasswordInputTypeIn";
 import { ThreeDotsLoader } from "@/components/Loading";
@@ -126,9 +126,9 @@ export function BotConfigCard() {
               disabled={!hasServerConfigs}
             >
               <Button
-                onClick={() => setShowDeleteConfirm(true)}
                 disabled={isSubmitting || hasServerConfigs}
-                danger
+                variant="danger"
+                onClick={() => setShowDeleteConfirm(true)}
               >
                 Delete Discord Token
               </Button>
@@ -166,8 +166,8 @@ export function BotConfigCard() {
                 className="flex-1"
               />
               <Button
-                onClick={handleSaveToken}
                 disabled={isSubmitting || !botToken.trim()}
+                onClick={handleSaveToken}
               >
                 {isSubmitting ? "Saving..." : "Save Token"}
               </Button>

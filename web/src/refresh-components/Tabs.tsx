@@ -39,9 +39,9 @@ const useTabsContext = () => {
  *
  * Contained (default):
  * ┌─────────────────────────────────────────────────┐
- * │ ┌──────────┐ ╔══════════╗ ┌──────────┐         │
- * │ │   Tab 1  │ ║  Tab 2   ║ │   Tab 3  │         │  ← gray background
- * │ └──────────┘ ╚══════════╝ └──────────┘         │
+ * │ ┌──────────┐ ╔══════════╗ ┌──────────┐          │
+ * │ │   Tab 1  │ ║  Tab 2   ║ │   Tab 3  │          │  ← gray background
+ * │ └──────────┘ ╚══════════╝ └──────────┘          │
  * └─────────────────────────────────────────────────┘
  *                 ↑ active tab (white bg, shadow)
  *
@@ -49,7 +49,7 @@ const useTabsContext = () => {
  *    Tab 1      Tab 2      Tab 3          [Action]
  *              ╔═════╗
  *              ║     ║                        ↑ optional rightContent
- * ────────────╨═════╨─────────────────────────────
+ * ─────────────╨═════╨─────────────────────────────
  *              ↑ sliding indicator under active tab
  *
  * @example
@@ -504,19 +504,19 @@ const TabsList = React.forwardRef<
               className="flex items-center gap-1 pl-2 flex-shrink-0"
             >
               <Button
+                disabled={!canScrollLeft}
                 prominence="tertiary"
                 size="sm"
                 icon={SvgChevronLeft}
                 onClick={handleScrollLeft}
-                disabled={!canScrollLeft}
                 tooltip="Scroll tabs left"
               />
               <Button
+                disabled={!canScrollRight}
                 prominence="tertiary"
                 size="sm"
                 icon={SvgChevronRight}
                 onClick={handleScrollRight}
-                disabled={!canScrollRight}
                 tooltip="Scroll tabs right"
               />
             </div>

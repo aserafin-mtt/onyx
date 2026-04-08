@@ -2,6 +2,7 @@
 
 import { useState, useCallback, useRef, useMemo } from "react";
 import useSWR from "swr";
+import { SWR_KEYS } from "@/lib/swr-keys";
 import {
   fetchLibraryTree,
   uploadLibraryFiles,
@@ -12,7 +13,7 @@ import {
 } from "@/app/craft/services/apiServices";
 import { LibraryEntry } from "@/app/craft/types/user-library";
 import Text from "@/refresh-components/texts/Text";
-import Button from "@/refresh-components/buttons/Button";
+import { Button } from "@opal/components";
 import Modal from "@/refresh-components/Modal";
 import ShadowDiv from "@/refresh-components/ShadowDiv";
 import { Section } from "@/layouts/general-layouts";
@@ -93,7 +94,7 @@ export default function UserLibraryModal({
     error,
     isLoading,
     mutate,
-  } = useSWR(open ? "/api/build/user-library/tree" : null, fetchLibraryTree, {
+  } = useSWR(open ? SWR_KEYS.buildUserLibraryTree : null, fetchLibraryTree, {
     revalidateOnFocus: false,
   });
 
@@ -214,7 +215,7 @@ export default function UserLibraryModal({
   return (
     <>
       <Modal open={open} onOpenChange={(isOpen) => !isOpen && onClose()}>
-        <Modal.Content width="md" height="fit">
+        <Modal.Content width="xl" height="fit">
           <Modal.Header
             icon={SvgFileText}
             title="Your Files"
@@ -245,10 +246,10 @@ export default function UserLibraryModal({
                   gap={0.5}
                   padding={0.5}
                 >
-                  <IconButton
+                  <Button
+                    prominence="secondary"
                     icon={SvgFolderPlus}
                     onClick={() => setShowNewFolderModal(true)}
-                    secondary
                     tooltip="New Folder"
                   />
                   <input
@@ -260,13 +261,13 @@ export default function UserLibraryModal({
                     disabled={isUploading}
                     accept=".xlsx,.xls,.docx,.doc,.pptx,.ppt,.csv,.json,.txt,.pdf,.zip"
                   />
-                  <IconButton
+                  <Button
+                    disabled={isUploading}
+                    prominence="secondary"
                     icon={SvgUploadCloud}
                     onClick={() => handleUploadToFolder("/")}
-                    disabled={isUploading}
                     tooltip={isUploading ? "Uploading..." : "Upload"}
                     aria-label={isUploading ? "Uploading..." : "Upload"}
-                    secondary
                   />
                 </Section>
 
@@ -373,7 +374,7 @@ export default function UserLibraryModal({
           </Modal.Body>
           <Modal.Footer>
             <Button
-              secondary
+              prominence="secondary"
               onClick={() => {
                 setShowNewFolderModal(false);
                 setNewFolderName("");
@@ -382,8 +383,8 @@ export default function UserLibraryModal({
               Cancel
             </Button>
             <Button
-              onClick={handleCreateDirectory}
               disabled={!newFolderName.trim()}
+              onClick={handleCreateDirectory}
             >
               Create
             </Button>
@@ -457,6 +458,7 @@ function LibraryTreeView({
 
               {/* Expand/collapse for directories */}
               {entry.is_directory ? (
+                // TODO(@raunakab): migrate to opal Button once it supports style prop
                 <IconButton
                   icon={SvgChevronRight}
                   onClick={() => onToggleFolder(entry.path)}
@@ -516,7 +518,8 @@ function LibraryTreeView({
                 height="fit"
               >
                 {entry.is_directory && (
-                  <IconButton
+                  <Button
+                    size="sm"
                     icon={SvgUploadCloud}
                     onClick={(e) => {
                       e.stopPropagation();
@@ -524,15 +527,14 @@ function LibraryTreeView({
                         entry.path.replace(/^user_library/, "") || "/";
                       onUploadToFolder(uploadPath);
                     }}
-                    small
                     tooltip="Upload to this folder"
                   />
                 )}
-                <IconButton
+                <Button
+                  variant="danger"
+                  size="sm"
                   icon={SvgTrash}
                   onClick={() => onDelete(entry)}
-                  small
-                  danger
                   tooltip="Delete"
                 />
               </Section>

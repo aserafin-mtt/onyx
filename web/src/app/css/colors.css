@@ -438,6 +438,9 @@
   --action-text-link-05: var(--blue-50);
   --action-text-danger-05: var(--red-50);
 
+  /* Background / Code */
+  --background-code-01: var(--grey-02);
+
   /* Code */
   --code-code: var(--alpha-grey-100-85);
   --code-comment: var(--alpha-grey-100-35);
@@ -464,6 +467,10 @@
 
   /* Frost Overlay (for FrostedDiv component) - lighter in light mode */
   --frost-overlay: var(--alpha-grey-00-10);
+
+  /* Scrollbar */
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: var(--alpha-grey-100-20);
 }
 
 /* Dark Colors */
@@ -639,6 +646,9 @@
   --action-text-link-05: var(--blue-45);
   --action-text-danger-05: var(--red-45);
 
+  /* Background / Code */
+  --background-code-01: #151617;
+
   /* Code */
   --code-code: var(--alpha-grey-00-85);
   --code-comment: var(--alpha-grey-00-45);
@@ -665,4 +675,8 @@
 
   /* Frost Overlay (for FrostedDiv component) - darker in dark mode */
   --frost-overlay: var(--alpha-grey-100-10);
+
+  /* Scrollbar */
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: var(--alpha-grey-00-20);
 }

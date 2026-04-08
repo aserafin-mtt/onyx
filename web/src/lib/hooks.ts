@@ -23,36 +23,34 @@ import {
 } from "react";
 import { DateRangePickerValue } from "@/components/dateRangeSelectors/AdminDateRangeSelector";
 import { SourceMetadata } from "./search/interfaces";
-import { parseLlmDescriptor } from "./llm/utils";
+import { parseLlmDescriptor } from "./llmConfig/utils";
 import { ChatSession } from "@/app/app/interfaces";
-import { AllUsersResponse } from "./types";
 import { Credential } from "./connectors/credentials";
 import { SettingsContext } from "@/providers/SettingsProvider";
 import {
   MinimalPersonaSnapshot,
   PersonaLabel,
-} from "@/app/admin/assistants/interfaces";
-import { LLMProviderDescriptor } from "@/app/admin/configuration/llm/interfaces";
+} from "@/app/admin/agents/interfaces";
+import { DefaultModel, LLMProviderDescriptor } from "@/interfaces/llm";
 import { isAnthropic } from "@/app/admin/configuration/llm/utils";
 import { getSourceMetadataForSources } from "./sources";
 import { AuthType, NEXT_PUBLIC_CLOUD_ENABLED } from "./constants";
 import { useUser } from "@/providers/UserProvider";
 import { SEARCH_TOOL_ID } from "@/app/app/components/tools/constants";
 import { updateTemperatureOverrideForChatSession } from "@/app/app/services/lib";
-import { useLLMProviders } from "./hooks/useLLMProviders";
-
-const CREDENTIAL_URL = "/api/manage/admin/credential";
+import { useLLMProviders } from "@/hooks/useLLMProviders";
+import { SWR_KEYS } from "@/lib/swr-keys";
 
 export const usePublicCredentials = () => {
   const { mutate } = useSWRConfig();
   const swrResponse = useSWR<Credential<any>[]>(
-    CREDENTIAL_URL,
+    SWR_KEYS.adminCredentials,
     errorHandlingFetcher
   );
 
   return {
     ...swrResponse,
-    refreshCredentials: () => mutate(CREDENTIAL_URL),
+    refreshCredentials: () => mutate(SWR_KEYS.adminCredentials),
   };
 };
 
@@ -88,12 +86,10 @@ export const useObjectState = <T>(
   return [state, set];
 };
 
-const INDEXING_STATUS_URL = "/api/manage/admin/connector/indexing-status";
-const CONNECTOR_STATUS_URL = "/api/manage/admin/connector/status";
-
 export const useConnectorIndexingStatusWithPagination = (
   filters: Omit<IndexingStatusRequest, "source" | "source_to_page"> = {},
-  refreshInterval = 30000
+  refreshInterval = 30000,
+  enabled: boolean = true
 ) => {
   const { mutate } = useSWRConfig();
   //maintains the current page for each source
@@ -125,7 +121,9 @@ export const useConnectorIndexingStatusWithPagination = (
     [filters]
   );
 
-  const swrKey = [INDEXING_STATUS_URL, JSON.stringify(mainRequest)];
+  const swrKey = enabled
+    ? [SWR_KEYS.indexingStatus, JSON.stringify(mainRequest)]
+    : null;
 
   // Main data fetch with auto-refresh
   const { data, isLoading, error } = useSWR<
@@ -188,7 +186,7 @@ export const useConnectorIndexingStatusWithPagination = (
 
   // Function to refresh all data (maintains current pagination)
   const refreshAllData = useCallback(() => {
-    mutate(swrKey);
+    if (swrKey) mutate(swrKey);
   }, [mutate, swrKey]);
 
   // Reset pagination when filters change (but not search)
@@ -208,33 +206,39 @@ export const useConnectorIndexingStatusWithPagination = (
   };
 };
 
-export const useConnectorStatus = (refreshInterval = 30000) => {
+export const useConnectorStatus = (
+  refreshInterval = 30000,
+  enabled: boolean = true
+) => {
   const { mutate } = useSWRConfig();
-  const url = CONNECTOR_STATUS_URL;
+  const url = SWR_KEYS.adminConnectorStatus;
   const swrResponse = useSWR<ConnectorStatus<any, any>[]>(
-    url,
+    enabled ? url : null,
     errorHandlingFetcher,
     { refreshInterval: refreshInterval }
   );
 
   return {
     ...swrResponse,
-    refreshIndexingStatus: () => mutate(url),
+    refreshIndexingStatus: enabled ? () => mutate(url) : () => {},
   };
 };
 
-export const useBasicConnectorStatus = () => {
-  const url = "/api/manage/connector-status";
-  const swrResponse = useSWR<CCPairBasicInfo[]>(url, errorHandlingFetcher);
+export const useBasicConnectorStatus = (enabled: boolean = true) => {
+  const url = SWR_KEYS.connectorStatus;
+  const swrResponse = useSWR<CCPairBasicInfo[]>(
+    enabled ? url : null,
+    errorHandlingFetcher
+  );
   return {
     ...swrResponse,
-    refreshIndexingStatus: () => mutate(url),
+    refreshIndexingStatus: enabled ? () => mutate(url) : () => {},
   };
 };
 
 export const useFederatedConnectors = () => {
   const { mutate } = useSWRConfig();
-  const url = "/api/federated";
+  const url = SWR_KEYS.federatedConnectors;
   const swrResponse = useSWR<FederatedConnectorDetail[]>(
     url,
     errorHandlingFetcher
@@ -249,27 +253,35 @@ export const useFederatedConnectors = () => {
 export const useLabels = () => {
   const { mutate } = useSWRConfig();
   const { data: labels, error } = useSWR<PersonaLabel[]>(
-    "/api/persona/labels",
+    SWR_KEYS.personaLabels,
     errorHandlingFetcher
   );
 
   const refreshLabels = async () => {
-    return mutate("/api/persona/labels");
+    return mutate(SWR_KEYS.personaLabels);
   };
 
-  const createLabel = async (name: string) => {
-    const response = await fetch("/api/persona/labels", {
+  const createLabel = async (name: string): Promise<PersonaLabel | null> => {
+    const response = await fetch(SWR_KEYS.personaLabels, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ name }),
     });
 
-    if (response.ok) {
-      const newLabel = await response.json();
-      mutate("/api/persona/labels", [...(labels || []), newLabel], false);
+    if (!response.ok) {
+      return null;
     }
 
-    return response;
+    const newLabel: PersonaLabel = await response.json();
+    mutate(
+      SWR_KEYS.personaLabels,
+      (currentLabels: PersonaLabel[] | undefined) => [
+        ...(currentLabels || []),
+        newLabel,
+      ],
+      false
+    );
+    return newLabel;
   };
 
   const updateLabel = async (id: number, name: string) => {
@@ -281,7 +293,7 @@ export const useLabels = () => {
 
     if (response.ok) {
       mutate(
-        "/api/persona/labels",
+        SWR_KEYS.personaLabels,
         labels?.map((label) => (label.id === id ? { ...label, name } : label)),
         false
       );
@@ -298,7 +310,7 @@ export const useLabels = () => {
 
     if (response.ok) {
       mutate(
-        "/api/persona/labels",
+        SWR_KEYS.personaLabels,
         labels?.filter((label) => label.id !== id),
         false
       );
@@ -476,7 +488,7 @@ export interface LlmManager {
   updateModelOverrideBasedOnChatSession: (chatSession?: ChatSession) => void;
   imageFilesPresent: boolean;
   updateImageFilesPresent: (present: boolean) => void;
-  liveAssistant: MinimalPersonaSnapshot | null;
+  liveAgent: MinimalPersonaSnapshot | null;
   maxTemperature: number;
   llmProviders: LLMProviderDescriptor[] | undefined;
   isLoadingProviders: boolean;
@@ -504,8 +516,8 @@ Thus, the input should be
 - Current assistant
 
 Changes take place as
-- liveAssistant or currentChatSession changes (and the associated model override is set)
-- (updateCurrentLlm) User explicitly setting a model override (and we explicitly override and set the userSpecifiedOverride which we'll use in place of the user preferences unless overridden by an assistant)
+- liveAgent or currentChatSession changes (and the associated model override is set)
+- (updateCurrentLlm) User explicitly setting a model override (and we explicitly override and set the userSpecifiedOverride which we'll use in place of the user preferences unless overridden by an agent)
 
 If we have a live assistant, we should use that model override
 
@@ -525,26 +537,31 @@ providing appropriate defaults for new conversations based on the available tool
 */
 
 export function getDefaultLlmDescriptor(
-  llmProviders: LLMProviderDescriptor[]
+  llmProviders: LLMProviderDescriptor[],
+  defaultText?: DefaultModel | null
 ): LlmDescriptor | null {
-  const defaultProvider = llmProviders.find(
-    (provider) => provider.is_default_provider
-  );
-  if (defaultProvider) {
-    return {
-      name: defaultProvider.name,
-      provider: defaultProvider.provider,
-      modelName: defaultProvider.default_model_name,
-    };
+  if (defaultText) {
+    const provider = llmProviders.find((p) => p.id === defaultText.provider_id);
+    if (provider) {
+      return {
+        name: provider.name,
+        provider: provider.provider,
+        modelName: defaultText.model_name,
+      };
+    }
   }
+  // Fallback: first provider with visible models
   const firstLlmProvider = llmProviders.find(
     (provider) => provider.model_configurations.length > 0
   );
   if (firstLlmProvider) {
+    const firstModel = firstLlmProvider.model_configurations.find(
+      (m) => m.is_visible
+    );
     return {
       name: firstLlmProvider.name,
       provider: firstLlmProvider.provider,
-      modelName: firstLlmProvider.default_model_name,
+      modelName: firstModel?.name ?? "",
     };
   }
   return null;
@@ -582,13 +599,16 @@ export function getValidLlmDescriptorForProviders(
     // This ensures we don't incorrectly match a model to the wrong provider
     // when the same model name exists across multiple providers (e.g., gpt-5 in Azure and OpenAI)
     if (model.provider && model.provider.length > 0) {
-      const matchingProvider = llmProviders.find(
-        (p) =>
-          p.provider === model.provider &&
-          p.model_configurations
-            .map((modelConfiguration) => modelConfiguration.name)
-            .includes(model.modelName)
+      const hasModel = (p: LLMProviderDescriptor) =>
+        p.model_configurations.some((mc) => mc.name === model.modelName);
+      const typeMatches = llmProviders.filter(
+        (p) => p.provider === model.provider && hasModel(p)
       );
+      // When multiple providers share the same type (e.g., two "anthropic"
+      // providers with different API keys), prefer the one whose name matches
+      // the user's explicit selection to avoid silently switching providers.
+      const matchingProvider =
+        typeMatches.find((p) => p.name === model.name) ?? typeMatches[0];
       if (matchingProvider) {
         return {
           ...model,
@@ -623,25 +643,30 @@ export function getValidLlmDescriptorForProviders(
 
 export function useLlmManager(
   currentChatSession?: ChatSession,
-  liveAssistant?: MinimalPersonaSnapshot
+  liveAgent?: MinimalPersonaSnapshot
 ): LlmManager {
   const { user } = useUser();
 
   // Get all user-accessible providers via SWR (general providers - no persona filter)
   // This includes public + all restricted providers user can access via groups
-  const { llmProviders: allUserProviders, isLoading: isLoadingAllProviders } =
-    useLLMProviders();
+  const {
+    llmProviders: allUserProviders,
+    defaultText: allUserDefaultText,
+    isLoading: isLoadingAllProviders,
+  } = useLLMProviders();
   // Fetch persona-specific providers to enforce RBAC restrictions per assistant
-  // Only fetch if we have an assistant selected
-  const personaId =
-    liveAssistant?.id !== undefined ? liveAssistant.id : undefined;
+  // Only fetch if we have an agent selected
+  const personaId = liveAgent?.id !== undefined ? liveAgent.id : undefined;
   const {
     llmProviders: personaProviders,
+    defaultText: personaDefaultText,
     isLoading: isLoadingPersonaProviders,
   } = useLLMProviders(personaId);
 
   const llmProviders =
     personaProviders !== undefined ? personaProviders : allUserProviders;
+  const defaultText =
+    personaProviders !== undefined ? personaDefaultText : allUserDefaultText;
 
   const [userHasManuallyOverriddenLLM, setUserHasManuallyOverriddenLLM] =
     useState(false);
@@ -653,20 +678,20 @@ export function useLlmManager(
   });
 
   // Track the previous assistant ID to detect when it changes
-  const prevAssistantIdRef = useRef<number | undefined>(undefined);
+  const prevAgentIdRef = useRef<number | undefined>(undefined);
 
   // Reset manual override when switching to a different assistant
   useEffect(() => {
     if (
-      liveAssistant?.id !== undefined &&
-      prevAssistantIdRef.current !== undefined &&
-      liveAssistant.id !== prevAssistantIdRef.current
+      liveAgent?.id !== undefined &&
+      prevAgentIdRef.current !== undefined &&
+      liveAgent.id !== prevAgentIdRef.current
     ) {
       // User switched to a different assistant - reset manual override
       setUserHasManuallyOverriddenLLM(false);
     }
-    prevAssistantIdRef.current = liveAssistant?.id;
-  }, [liveAssistant?.id]);
+    prevAgentIdRef.current = liveAgent?.id;
+  }, [liveAgent?.id]);
 
   const llmUpdate = () => {
     /* Should be called when the live assistant or current chat session changes */
@@ -689,9 +714,9 @@ export function useLlmManager(
         setCurrentLlm(
           getValidLlmDescriptor(currentChatSession.current_alternate_model)
         );
-      } else if (liveAssistant?.llm_model_version_override) {
+      } else if (liveAgent?.llm_model_version_override) {
         setCurrentLlm(
-          getValidLlmDescriptor(liveAssistant.llm_model_version_override)
+          getValidLlmDescriptor(liveAgent.llm_model_version_override)
         );
       } else if (userHasManuallyOverriddenLLM) {
         // if the user has an override and there's nothing special about the
@@ -700,7 +725,7 @@ export function useLlmManager(
       } else if (user?.preferences?.default_model) {
         setCurrentLlm(getValidLlmDescriptor(user.preferences.default_model));
       } else {
-        const defaultLlm = getDefaultLlmDescriptor(llmProviders);
+        const defaultLlm = getDefaultLlmDescriptor(llmProviders, defaultText);
         if (defaultLlm) {
           setCurrentLlm(defaultLlm);
         }
@@ -753,9 +778,7 @@ export function useLlmManager(
         currentChatSession.current_temperature_override,
         isAnthropicModel ? 1.0 : 2.0
       );
-    } else if (
-      liveAssistant?.tools.some((tool) => tool.name === SEARCH_TOOL_ID)
-    ) {
+    } else if (liveAgent?.tools.some((tool) => tool.name === SEARCH_TOOL_ID)) {
       return 0;
     }
     return 0.5;
@@ -802,15 +825,13 @@ export function useLlmManager(
 
     if (currentChatSession?.current_temperature_override) {
       setTemperature(currentChatSession.current_temperature_override);
-    } else if (
-      liveAssistant?.tools.some((tool) => tool.name === SEARCH_TOOL_ID)
-    ) {
+    } else if (liveAgent?.tools.some((tool) => tool.name === SEARCH_TOOL_ID)) {
       setTemperature(0);
     } else {
       setTemperature(0.5);
     }
   }, [
-    liveAssistant,
+    liveAgent,
     currentChatSession,
     llmProviders,
     user?.preferences?.default_model,
@@ -826,8 +847,10 @@ export function useLlmManager(
     }
   };
 
-  // Track if any provider exists (for onboarding checks)
-  const hasAnyProvider = (allUserProviders?.length ?? 0) > 0;
+  // Track if any provider exists for the current persona context.
+  // Uses the persona-aware list so chat input reflects actual access,
+  // falling back to the global list when no persona is selected.
+  const hasAnyProvider = (llmProviders?.length ?? 0) > 0;
 
   return {
     updateModelOverrideBasedOnChatSession,
@@ -837,7 +860,7 @@ export function useLlmManager(
     updateTemperature,
     imageFilesPresent,
     updateImageFilesPresent,
-    liveAssistant: liveAssistant ?? null,
+    liveAgent: liveAgent ?? null,
     maxTemperature,
     llmProviders,
     isLoadingProviders:
@@ -849,7 +872,7 @@ export function useLlmManager(
 
 export function useAuthType(): AuthType | null {
   const { data, error } = useSWR<{ auth_type: AuthType }>(
-    "/api/auth/type",
+    SWR_KEYS.authType,
     errorHandlingFetcher
   );
 
@@ -868,8 +891,6 @@ export function useAuthType(): AuthType | null {
 EE Only APIs
 */
 
-const USER_GROUP_URL = "/api/manage/admin/user-group";
-
 export const useUserGroups = (): {
   data: UserGroup[] | undefined;
   isLoading: boolean;
@@ -877,28 +898,40 @@ export const useUserGroups = (): {
   refreshUserGroups: () => void;
 } => {
   const combinedSettings = useContext(SettingsContext);
+  const isLoading = combinedSettings?.settingsLoading ?? false;
   const isPaidEnterpriseFeaturesEnabled =
-    combinedSettings && combinedSettings.enterpriseSettings !== null;
+    !isLoading &&
+    combinedSettings &&
+    combinedSettings.enterpriseSettings !== null;
 
   const swrResponse = useSWR<UserGroup[]>(
-    isPaidEnterpriseFeaturesEnabled ? USER_GROUP_URL : null,
+    isPaidEnterpriseFeaturesEnabled ? SWR_KEYS.adminUserGroups : null,
     errorHandlingFetcher
   );
 
+  const refreshUserGroups = () => mutate(SWR_KEYS.adminUserGroups);
+
+  if (isLoading) {
+    return {
+      data: undefined,
+      isLoading: true,
+      error: "",
+      refreshUserGroups,
+    };
+  }
+
   if (!isPaidEnterpriseFeaturesEnabled) {
     return {
-      ...{
-        data: [],
-        isLoading: false,
-        error: "",
-      },
-      refreshUserGroups: () => {},
+      data: [],
+      isLoading: false,
+      error: "",
+      refreshUserGroups,
     };
   }
 
   return {
     ...swrResponse,
-    refreshUserGroups: () => mutate(USER_GROUP_URL),
+    refreshUserGroups,
   };
 };
 
@@ -906,7 +939,7 @@ export const fetchConnectorIndexingStatus = async (
   request: IndexingStatusRequest = {},
   sourcePages: Record<ValidSources, number> | null = null
 ): Promise<ConnectorIndexingStatusLiteResponse[]> => {
-  const response = await fetch(INDEXING_STATUS_URL, {
+  const response = await fetch(SWR_KEYS.indexingStatus, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

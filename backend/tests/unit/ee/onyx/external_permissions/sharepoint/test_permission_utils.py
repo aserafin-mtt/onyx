@@ -3,8 +3,13 @@ from typing import Any
 from unittest.mock import MagicMock
 from unittest.mock import patch
 
+import pytest
+
 from ee.onyx.external_permissions.sharepoint.permission_utils import (
     _enumerate_ad_groups_paginated,
+)
+from ee.onyx.external_permissions.sharepoint.permission_utils import (
+    _is_public_item,
 )
 from ee.onyx.external_permissions.sharepoint.permission_utils import (
     _iter_graph_collection,
@@ -14,6 +19,9 @@ from ee.onyx.external_permissions.sharepoint.permission_utils import (
 )
 from ee.onyx.external_permissions.sharepoint.permission_utils import (
     AD_GROUP_ENUMERATION_THRESHOLD,
+)
+from ee.onyx.external_permissions.sharepoint.permission_utils import (
+    get_external_access_from_sharepoint,
 )
 from ee.onyx.external_permissions.sharepoint.permission_utils import (
     get_sharepoint_external_groups,
@@ -192,7 +200,8 @@ def _stub_role_assignment_resolution(
 @patch(f"{MODULE}._get_groups_and_members_recursively")
 @patch(f"{MODULE}.sleep_and_retry")
 def test_default_skips_ad_enumeration(
-    mock_sleep: MagicMock, mock_recursive: MagicMock  # noqa: ARG001
+    mock_sleep: MagicMock,  # noqa: ARG001
+    mock_recursive: MagicMock,
 ) -> None:
     mock_recursive.return_value = GroupsResult(
         groups_to_emails={"SiteGroup_abc": {"alice@contoso.com"}},
@@ -266,3 +275,205 @@ def test_enumerate_all_without_token_skips(
 
     assert results == []
     mock_enum.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# get_external_access_from_sharepoint – site page URL handling
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "site_base_url, web_url, expected_relative_url",
+    [
+        (
+            "https://tenant.sharepoint.com/sites/Evan%27sSite",
+            "https://tenant.sharepoint.com/sites/Evan%27sSite/SitePages/Home.aspx",
+            "/sites/Evan%27sSite/SitePages/Home.aspx",
+        ),
+        (
+            "https://tenant.sharepoint.com/sites/NormalSite",
+            "https://tenant.sharepoint.com/sites/NormalSite/SitePages/Page.aspx",
+            "/sites/NormalSite/SitePages/Page.aspx",
+        ),
+        (
+            "https://tenant.sharepoint.com/sites/Site%20With%20Spaces",
+            "https://tenant.sharepoint.com/sites/Site%20With%20Spaces/SitePages/Doc.aspx",
+            "/sites/Site%20With%20Spaces/SitePages/Doc.aspx",
+        ),
+    ],
+    ids=["apostrophe-encoded", "no-special-chars", "space-encoded"],
+)
+@patch(f"{MODULE}._get_groups_and_members_recursively")
+@patch(f"{MODULE}.sleep_and_retry")
+def test_site_page_url_not_duplicated(
+    mock_sleep: MagicMock,  # noqa: ARG001
+    mock_recursive: MagicMock,
+    site_base_url: str,
+    web_url: str,
+    expected_relative_url: str,
+) -> None:
+    """Regression: the server-relative URL passed to
+    get_file_by_server_relative_url must preserve percent-encoding so the
+    Office365 library's SPResPath.create_relative() recognises the site prefix
+    and doesn't duplicate it."""
+    mock_recursive.return_value = GroupsResult(
+        groups_to_emails={},
+        found_public_group=False,
+    )
+
+    ctx = MagicMock()
+    ctx.base_url = site_base_url
+
+    site_page = {"webUrl": web_url}
+
+    get_external_access_from_sharepoint(
+        client_context=ctx,
+        graph_client=MagicMock(),
+        drive_name=None,
+        drive_item=None,
+        site_page=site_page,
+    )
+
+    ctx.web.get_file_by_server_relative_url.assert_called_once_with(
+        expected_relative_url
+    )
+
+
+# ---------------------------------------------------------------------------
+# _is_public_item – sharing link visibility
+# ---------------------------------------------------------------------------
+
+
+def _make_permission(scope: str | None) -> MagicMock:
+    perm = MagicMock()
+    if scope is None:
+        perm.link = None
+    else:
+        perm.link = MagicMock()
+        perm.link.scope = scope
+    return perm
+
+
+def _make_drive_item_with_permissions(
+    permissions: list[MagicMock],
+) -> MagicMock:
+    drive_item = MagicMock()
+    drive_item.id = "item-123"
+    drive_item.permissions.get_all.return_value = permissions
+    return drive_item
+
+
+@patch(f"{MODULE}.sleep_and_retry", side_effect=lambda query, _label: query)
+def test_is_public_item_anonymous_link_when_enabled(
+    _mock_sleep: MagicMock,
+) -> None:
+    drive_item = _make_drive_item_with_permissions([_make_permission("anonymous")])
+    assert _is_public_item(drive_item, treat_sharing_link_as_public=True) is True
+
+
+@patch(f"{MODULE}.sleep_and_retry", side_effect=lambda query, _label: query)
+def test_is_public_item_org_link_when_enabled(
+    _mock_sleep: MagicMock,
+) -> None:
+    drive_item = _make_drive_item_with_permissions([_make_permission("organization")])
+    assert _is_public_item(drive_item, treat_sharing_link_as_public=True) is True
+
+
+@patch(f"{MODULE}.sleep_and_retry", side_effect=lambda query, _label: query)
+def test_is_public_item_anonymous_link_when_disabled(
+    _mock_sleep: MagicMock,
+) -> None:
+    """When the flag is off, anonymous links do NOT make the item public."""
+    drive_item = _make_drive_item_with_permissions([_make_permission("anonymous")])
+    assert _is_public_item(drive_item, treat_sharing_link_as_public=False) is False
+
+
+@patch(f"{MODULE}.sleep_and_retry", side_effect=lambda query, _label: query)
+def test_is_public_item_org_link_when_disabled(
+    _mock_sleep: MagicMock,
+) -> None:
+    """When the flag is off, org links do NOT make the item public."""
+    drive_item = _make_drive_item_with_permissions([_make_permission("organization")])
+    assert _is_public_item(drive_item, treat_sharing_link_as_public=False) is False
+
+
+@patch(f"{MODULE}.sleep_and_retry", side_effect=lambda query, _label: query)
+def test_is_public_item_no_sharing_links(
+    _mock_sleep: MagicMock,
+) -> None:
+    """User-level permissions only — not public even when flag is on."""
+    drive_item = _make_drive_item_with_permissions([_make_permission(None)])
+    assert _is_public_item(drive_item, treat_sharing_link_as_public=True) is False
+
+
+@patch(f"{MODULE}.sleep_and_retry", side_effect=lambda query, _label: query)
+def test_is_public_item_default_is_false(
+    _mock_sleep: MagicMock,
+) -> None:
+    """Default value of the flag is False, so sharing links are ignored."""
+    drive_item = _make_drive_item_with_permissions([_make_permission("anonymous")])
+    assert _is_public_item(drive_item) is False
+
+
+def test_is_public_item_skips_api_call_when_disabled() -> None:
+    """When the flag is off, the permissions API is never called."""
+    drive_item = MagicMock()
+    _is_public_item(drive_item, treat_sharing_link_as_public=False)
+    drive_item.permissions.get_all.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# get_external_access_from_sharepoint – sharing link integration
+# ---------------------------------------------------------------------------
+
+
+@patch(f"{MODULE}._is_public_item", return_value=True)
+@patch(f"{MODULE}.sleep_and_retry")
+def test_drive_item_public_when_sharing_link_enabled(
+    _mock_sleep: MagicMock,
+    _mock_is_public: MagicMock,
+) -> None:
+    """With treat_sharing_link_as_public=True, a public item returns is_public=True
+    and skips role-assignment resolution entirely."""
+    drive_item = MagicMock()
+
+    result = get_external_access_from_sharepoint(
+        client_context=MagicMock(),
+        graph_client=MagicMock(),
+        drive_name="Documents",
+        drive_item=drive_item,
+        site_page=None,
+        treat_sharing_link_as_public=True,
+    )
+
+    assert result.is_public is True
+    assert result.external_user_emails == set()
+    assert result.external_user_group_ids == set()
+
+
+@patch(f"{MODULE}._get_groups_and_members_recursively")
+@patch(f"{MODULE}.sleep_and_retry")
+@patch(f"{MODULE}._is_public_item", return_value=False)
+def test_drive_item_falls_through_when_sharing_link_disabled(
+    _mock_is_public: MagicMock,
+    mock_sleep: MagicMock,  # noqa: ARG001
+    mock_recursive: MagicMock,
+) -> None:
+    """With treat_sharing_link_as_public=False, the function falls through to
+    role-assignment-based permission resolution."""
+    mock_recursive.return_value = GroupsResult(
+        groups_to_emails={"SiteMembers_abc": {"alice@contoso.com"}},
+        found_public_group=False,
+    )
+
+    result = get_external_access_from_sharepoint(
+        client_context=MagicMock(),
+        graph_client=MagicMock(),
+        drive_name="Documents",
+        drive_item=MagicMock(),
+        site_page=None,
+        treat_sharing_link_as_public=False,
+    )
+
+    assert result.is_public is False
+    assert len(result.external_user_group_ids) > 0

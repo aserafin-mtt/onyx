@@ -35,6 +35,18 @@ if TYPE_CHECKING:
     pass
 
 
+class EmailInviteStatus(str, Enum):
+    SENT = "SENT"
+    NOT_CONFIGURED = "NOT_CONFIGURED"
+    SEND_FAILED = "SEND_FAILED"
+    DISABLED = "DISABLED"
+
+
+class BulkInviteResponse(BaseModel):
+    invited_count: int
+    email_invite_status: EmailInviteStatus
+
+
 class VersionResponse(BaseModel):
     backend_version: str
 
@@ -72,6 +84,11 @@ class UserPreferences(BaseModel):
     theme_preference: ThemePreference | None = None
     chat_background: str | None = None
     default_app_mode: DefaultAppMode = DefaultAppMode.CHAT
+
+    # Voice preferences
+    voice_auto_send: bool | None = None
+    voice_auto_playback: bool | None = None
+    voice_playback_speed: float | None = None
 
     # controls which tools are enabled for the user for a specific assistant
     assistant_specific_configs: UserSpecificAssistantPreferences | None = None
@@ -130,6 +147,7 @@ class UserInfo(BaseModel):
         is_anonymous_user: bool | None = None,
         tenant_info: TenantInfo | None = None,
         assistant_specific_configs: UserSpecificAssistantPreferences | None = None,
+        memories: list[MemoryItem] | None = None,
     ) -> "UserInfo":
         return cls(
             id=str(user.id),
@@ -152,6 +170,9 @@ class UserInfo(BaseModel):
                     theme_preference=user.theme_preference,
                     chat_background=user.chat_background,
                     default_app_mode=user.default_app_mode,
+                    voice_auto_send=user.voice_auto_send,
+                    voice_auto_playback=user.voice_auto_playback,
+                    voice_playback_speed=user.voice_playback_speed,
                     assistant_specific_configs=assistant_specific_configs,
                 )
             ),
@@ -171,10 +192,7 @@ class UserInfo(BaseModel):
                 role=user.personal_role or "",
                 use_memories=user.use_memories,
                 enable_memory_tool=user.enable_memory_tool,
-                memories=[
-                    MemoryItem(id=memory.id, content=memory.memory_text)
-                    for memory in (user.memories or [])
-                ],
+                memories=memories or [],
                 user_preferences=user.user_preferences or "",
             ),
         )
@@ -226,6 +244,12 @@ class DefaultAppModeRequest(BaseModel):
 
 class ChatBackgroundRequest(BaseModel):
     chat_background: str | None
+
+
+class VoiceSettingsUpdateRequest(BaseModel):
+    auto_send: bool | None = None
+    auto_playback: bool | None = None
+    playback_speed: float | None = Field(default=None, ge=0.5, le=2.0)
 
 
 class PersonalizationUpdateRequest(BaseModel):

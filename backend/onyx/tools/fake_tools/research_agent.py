@@ -1,3 +1,4 @@
+import queue
 import time
 from collections.abc import Callable
 from typing import Any
@@ -120,7 +121,7 @@ def generate_intermediate_report(
             custom_agent_prompt=None,
             simple_chat_history=history,
             reminder_message=reminder_message,
-            project_files=None,
+            context_files=None,
             available_tokens=llm.config.max_input_tokens,
         )
 
@@ -325,7 +326,7 @@ def run_research_agent_call(
                     custom_agent_prompt=None,
                     simple_chat_history=msg_history,
                     reminder_message=reminder_message,
-                    project_files=None,
+                    context_files=None,
                     available_tokens=llm.config.max_input_tokens,
                 )
 
@@ -632,8 +633,7 @@ def _on_research_agent_timeout(
         RESEARCH_AGENT_TASK_KEY, "unknown"
     )
     logger.warning(
-        f"Research agent timed out after {RESEARCH_AGENT_TIMEOUT_SECONDS} seconds "
-        f"for task: {research_task}"
+        f"Research agent timed out after {RESEARCH_AGENT_TIMEOUT_SECONDS} seconds for task: {research_task}"
     )
     return ResearchAgentCallResult(
         intermediate_report=RESEARCH_AGENT_TIMEOUT_MESSAGE,
@@ -709,7 +709,6 @@ def run_research_agent_calls(
 
 
 if __name__ == "__main__":
-    from queue import Queue
     from uuid import uuid4
 
     from onyx.chat.chat_state import ChatStateContainer
@@ -737,7 +736,7 @@ if __name__ == "__main__":
             llm.config.model_name, llm.config.model_provider
         )
 
-        persona = get_default_behavior_persona(db_session)
+        persona = get_default_behavior_persona(db_session, eager_load_for_tools=True)
         if persona is None:
             raise ValueError("No default persona found")
 
@@ -745,8 +744,8 @@ if __name__ == "__main__":
         if user is None:
             raise ValueError("No users found in database. Please create a user first.")
 
-        bus: Queue[Packet] = Queue()
-        emitter = Emitter(bus)
+        emitter_queue: queue.Queue = queue.Queue()
+        emitter = Emitter(merged_queue=emitter_queue)
         state_container = ChatStateContainer()
 
         tool_dict = construct_tools(
@@ -793,4 +792,4 @@ if __name__ == "__main__":
             print(result.intermediate_report)
             print("=" * 80)
             print(f"Citations: {result.citation_mapping}")
-            print(f"Total packets emitted: {bus.qsize()}")
+            print(f"Total packets emitted: {emitter_queue.qsize()}")
