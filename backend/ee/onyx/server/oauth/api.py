@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 from ee.onyx.server.oauth.api_router import router
 from ee.onyx.server.oauth.confluence_cloud import ConfluenceCloudOAuth
 from ee.onyx.server.oauth.google_drive import GoogleDriveOAuth
+from ee.onyx.server.oauth.google_drive import GoogleDriveUserOAuth
 from ee.onyx.server.oauth.slack import SlackOAuth
 from onyx.auth.permissions import require_permission
 from onyx.configs.app_configs import DEV_MODE
@@ -25,6 +26,7 @@ logger = setup_logger()
 def prepare_authorization_request(
     connector: DocumentSource,
     redirect_on_success: str | None,
+    scope_mode: str | None = None,
     user: User = Depends(require_permission(Permission.FULL_ADMIN_PANEL_ACCESS)),
     tenant_id: str | None = Depends(get_current_tenant_id),
 ) -> JSONResponse:
@@ -61,11 +63,16 @@ def prepare_authorization_request(
             email=user.email, redirect_on_success=redirect_on_success
         )
     elif connector == DocumentSource.GOOGLE_DRIVE:
+        # scope_mode="user" selects the narrow single-user OAuth flow (no
+        # admin.directory.*), so non-workspace-admins can consent.
+        gdrive_cls = (
+            GoogleDriveUserOAuth if scope_mode == "user" else GoogleDriveOAuth
+        )
         if not DEV_MODE:
-            oauth_url = GoogleDriveOAuth.generate_oauth_url(oauth_state)
+            oauth_url = gdrive_cls.generate_oauth_url(oauth_state)
         else:
-            oauth_url = GoogleDriveOAuth.generate_dev_oauth_url(oauth_state)
-        session = GoogleDriveOAuth.session_dump_json(
+            oauth_url = gdrive_cls.generate_dev_oauth_url(oauth_state)
+        session = gdrive_cls.session_dump_json(
             email=user.email, redirect_on_success=redirect_on_success
         )
     else:

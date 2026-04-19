@@ -6,6 +6,7 @@ import { useRouter } from "next/navigation";
 import type { Route } from "next";
 import { adminDeleteCredential } from "@/lib/credential";
 import { setupGoogleDriveOAuth } from "@/lib/googleDrive";
+import { prepareOAuthAuthorizationRequest } from "@/lib/oauth_utils";
 import { DOCS_ADMINS_PATH } from "@/lib/constants";
 import { TextFormField, SectionHeader } from "@/components/Field";
 import { Form, Formik } from "formik";
@@ -484,6 +485,26 @@ export const DriveAuthSection = ({
     );
   }
 
+  const handleUserOAuth = async () => {
+    setIsAuthenticating(true);
+    try {
+      const response = await prepareOAuthAuthorizationRequest(
+        "google_drive",
+        null,
+        "user"
+      );
+      if (response.url) {
+        window.location.href = response.url;
+      } else {
+        toast.error("Failed to fetch OAuth URL");
+        setIsAuthenticating(false);
+      }
+    } catch (error) {
+      toast.error(`Failed to authenticate with Google Drive - ${error}`);
+      setIsAuthenticating(false);
+    }
+  };
+
   // If no credentials are uploaded, show message to complete step 1 first
   if (
     !localServiceAccountData?.service_account_email &&
@@ -492,12 +513,24 @@ export const DriveAuthSection = ({
     return (
       <div>
         <SectionHeader>Google Drive Authentication</SectionHeader>
+        <div className="mt-4 mb-4 py-3 px-4 bg-background-tint-02 rounded">
+          <p className="text-sm mb-3">
+            Sign in with your Google account to index only the files you
+            personally have access to. This does not require workspace-admin
+            approval.
+          </p>
+          <Button disabled={isAuthenticating} onClick={handleUserOAuth}>
+            {isAuthenticating
+              ? "Authenticating..."
+              : "Sign in with Google (my files only)"}
+          </Button>
+        </div>
         <div className="mt-4">
           <div className="flex items-start py-3 px-4 bg-yellow-50/30 dark:bg-yellow-900/5 rounded">
             <FiAlertTriangle className="text-yellow-500 h-5 w-5 mr-2 mt-0.5 flex-shrink-0" />
             <p className="text-sm">
-              Please complete Step 1 by uploading either OAuth credentials or a
-              Service Account key before proceeding with authentication.
+              To index workspace-wide content, complete Step 1 by uploading
+              either OAuth credentials or a Service Account key.
             </p>
           </div>
         </div>

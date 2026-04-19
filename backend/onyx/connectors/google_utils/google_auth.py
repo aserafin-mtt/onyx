@@ -21,7 +21,7 @@ from onyx.connectors.google_utils.shared_constants import (
     DB_CREDENTIALS_PRIMARY_ADMIN_KEY,
 )
 from onyx.connectors.google_utils.shared_constants import (
-    GOOGLE_SCOPES,
+    get_scopes_for_auth_method,
 )
 from onyx.connectors.google_utils.shared_constants import (
     GoogleOAuthAuthenticationMethod,
@@ -48,7 +48,9 @@ def sanitize_oauth_credentials(oauth_creds: OAuthCredentials) -> str:
 
 
 def get_google_oauth_creds(
-    token_json_str: str, source: DocumentSource
+    token_json_str: str,
+    source: DocumentSource,
+    authentication_method: str = GoogleOAuthAuthenticationMethod.UPLOADED.value,
 ) -> OAuthCredentials | None:
     """creds_json only needs to contain client_id, client_secret and refresh_token to
     refresh the creds.
@@ -56,11 +58,15 @@ def get_google_oauth_creds(
     expiry and token are optional ... however, if passing in expiry, token
     should also be passed in or else we may not return any creds.
     (probably a sign we should refactor the function)
+
+    authentication_method controls which scope list is used — single-user OAuth
+    tokens are granted only drive.* scopes and refreshing with admin.directory.*
+    in the list would fail.
     """
     creds_json = json.loads(token_json_str)
     creds = OAuthCredentials.from_authorized_user_info(
         info=creds_json,
-        scopes=GOOGLE_SCOPES[source],
+        scopes=get_scopes_for_auth_method(source, authentication_method),
     )
     if creds.valid:
         return creds
@@ -109,11 +115,13 @@ def get_google_creds(
         # only send what get_google_oauth_creds needs
         authorized_user_info = {}
 
-        # oauth_interactive is sanitized and needs credentials from the environment
-        if (
-            authentication_method
-            == GoogleOAuthAuthenticationMethod.OAUTH_INTERACTIVE.value
-        ):
+        # Interactive flows (both admin and single-user) are sanitized before
+        # storage — client_id/secret live in env vars, not the DB.
+        interactive_methods = (
+            GoogleOAuthAuthenticationMethod.OAUTH_INTERACTIVE.value,
+            GoogleOAuthAuthenticationMethod.OAUTH_USER_INTERACTIVE.value,
+        )
+        if authentication_method in interactive_methods:
             authorized_user_info["client_id"] = OAUTH_GOOGLE_DRIVE_CLIENT_ID
             authorized_user_info["client_secret"] = OAUTH_GOOGLE_DRIVE_CLIENT_SECRET
         else:
@@ -127,17 +135,16 @@ def get_google_creds(
 
         token_json_str = json.dumps(authorized_user_info)
         oauth_creds = get_google_oauth_creds(
-            token_json_str=token_json_str, source=source
+            token_json_str=token_json_str,
+            source=source,
+            authentication_method=authentication_method,
         )
 
         # tell caller to update token stored in DB if the refresh token changed
         if oauth_creds:
             if oauth_creds.refresh_token != authorized_user_info["refresh_token"]:
-                # if oauth_interactive, sanitize the credentials so they don't get stored in the db
-                if (
-                    authentication_method
-                    == GoogleOAuthAuthenticationMethod.OAUTH_INTERACTIVE.value
-                ):
+                # for interactive flows, sanitize so client_id/secret aren't stored in the db
+                if authentication_method in interactive_methods:
                     oauth_creds_json_str = sanitize_oauth_credentials(oauth_creds)
                 else:
                     oauth_creds_json_str = oauth_creds.to_json()

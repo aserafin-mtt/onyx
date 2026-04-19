@@ -70,6 +70,9 @@ from onyx.connectors.google_utils.google_kv import (
     upsert_service_account_key,
 )
 from onyx.connectors.google_utils.google_kv import verify_csrf
+from onyx.connectors.google_utils.shared_constants import (
+    DB_CREDENTIALS_AUTHENTICATION_METHOD,
+)
 from onyx.connectors.google_utils.shared_constants import DB_CREDENTIALS_DICT_TOKEN_KEY
 from onyx.connectors.google_utils.shared_constants import (
     GoogleOAuthAuthenticationMethod,
@@ -422,9 +425,16 @@ def check_drive_tokens(
     if DB_CREDENTIALS_DICT_TOKEN_KEY not in credential_json:
         return AuthStatus(authenticated=False)
     token_json_str = str(credential_json[DB_CREDENTIALS_DICT_TOKEN_KEY])
+    authentication_method = str(
+        credential_json.get(
+            DB_CREDENTIALS_AUTHENTICATION_METHOD,
+            GoogleOAuthAuthenticationMethod.UPLOADED.value,
+        )
+    )
     google_drive_creds = get_google_oauth_creds(
         token_json_str=token_json_str,
         source=DocumentSource.GOOGLE_DRIVE,
+        authentication_method=authentication_method,
     )
     if google_drive_creds is None:
         return AuthStatus(authenticated=False)

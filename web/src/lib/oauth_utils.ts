@@ -9,7 +9,8 @@ import {
 // server side handler to help initiate the oauth authorization request
 export async function prepareOAuthAuthorizationRequest(
   connector: string,
-  finalRedirect: string | null // a redirect (not the oauth redirect) for the user to return to after oauth is complete)
+  finalRedirect: string | null, // a redirect (not the oauth redirect) for the user to return to after oauth is complete)
+  scopeMode?: "user" // for google-drive: "user" selects the narrow single-user OAuth flow
 ): Promise<OAuthPrepareAuthorizationResponse> {
   let url = `/api/oauth/prepare-authorization-request?connector=${encodeURIComponent(
     connector
@@ -18,6 +19,10 @@ export async function prepareOAuthAuthorizationRequest(
   // Conditionally append the `redirect_on_success` parameter
   if (finalRedirect) {
     url += `&redirect_on_success=${encodeURIComponent(finalRedirect)}`;
+  }
+
+  if (scopeMode) {
+    url += `&scope_mode=${encodeURIComponent(scopeMode)}`;
   }
 
   const response = await fetch(url, {

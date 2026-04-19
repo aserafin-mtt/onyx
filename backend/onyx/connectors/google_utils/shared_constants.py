@@ -18,6 +18,15 @@ GOOGLE_SCOPES = {
     ],
 }
 
+# Scopes for single-user OAuth — no admin.directory.* so that non-workspace-admin
+# users can consent. Only drive read access for the authenticated user.
+GOOGLE_USER_SCOPES = {
+    DocumentSource.GOOGLE_DRIVE: [
+        "https://www.googleapis.com/auth/drive.readonly",
+        "https://www.googleapis.com/auth/drive.metadata.readonly",
+    ],
+}
+
 # This is the Oauth token
 DB_CREDENTIALS_DICT_TOKEN_KEY = "google_tokens"
 # This is the service account key
@@ -35,7 +44,22 @@ DB_CREDENTIALS_AUTHENTICATION_METHOD = "authentication_method"
 
 class GoogleOAuthAuthenticationMethod(str, PyEnum):
     OAUTH_INTERACTIVE = "oauth_interactive"
+    OAUTH_USER_INTERACTIVE = "oauth_user_interactive"
     UPLOADED = "uploaded"
+
+
+def get_scopes_for_auth_method(
+    source: DocumentSource, authentication_method: str
+) -> list[str]:
+    """Pick the scope list matching the OAuth flow that granted this token.
+
+    Single-user OAuth (OAUTH_USER_INTERACTIVE) was granted with a narrower
+    scope set (no admin.directory.*). Passing the wider GOOGLE_SCOPES here
+    would cause the refresh call to fail with invalid_scope.
+    """
+    if authentication_method == GoogleOAuthAuthenticationMethod.OAUTH_USER_INTERACTIVE.value:
+        return GOOGLE_USER_SCOPES[source]
+    return GOOGLE_SCOPES[source]
 
 
 USER_FIELDS = "nextPageToken, users(primaryEmail)"

@@ -50,6 +50,7 @@ class GoogleDriveOAuth:
 
         email: str
         redirect_on_success: str | None  # Where to send the user if OAuth flow succeeds
+        scope_mode: str | None = None  # "user" for single-user OAuth, None for admin
 
     CLIENT_ID = OAUTH_GOOGLE_DRIVE_CLIENT_ID
     CLIENT_SECRET = OAUTH_GOOGLE_DRIVE_CLIENT_SECRET
@@ -111,6 +112,30 @@ class GoogleDriveOAuth:
         return session
 
 
+class GoogleDriveUserOAuth(GoogleDriveOAuth):
+    """Single-user OAuth — narrower scope (no admin.directory.*) so a non-workspace-admin
+    can consent without workspace-wide approval. Only indexes the authenticated user's
+    own accessible files.
+
+    Shares REDIRECT_URI with GoogleDriveOAuth so only one URL needs to be registered
+    with the Google OAuth client. The callback dispatches based on session.scope_mode.
+    """
+
+    SCOPE = (
+        "https://www.googleapis.com/auth/drive.readonly%20"
+        "https://www.googleapis.com/auth/drive.metadata.readonly"
+    )
+
+    @classmethod
+    def session_dump_json(cls, email: str, redirect_on_success: str | None) -> str:
+        session = GoogleDriveOAuth.OAuthSession(
+            email=email,
+            redirect_on_success=redirect_on_success,
+            scope_mode="user",
+        )
+        return session.model_dump_json()
+
+
 @router.post("/connector/google-drive/callback")
 def handle_google_drive_oauth_callback(
     code: str,
@@ -151,6 +176,7 @@ def handle_google_drive_oauth_callback(
     session_json = session_json_bytes.decode("utf-8")
     try:
         session = GoogleDriveOAuth.parse_session(session_json)
+        is_user_mode = session.scope_mode == "user"
 
         if not DEV_MODE:
             redirect_uri = GoogleDriveOAuth.REDIRECT_URI
@@ -183,9 +209,17 @@ def handle_google_drive_oauth_callback(
         authorized_user_info["client_secret"] = OAUTH_GOOGLE_DRIVE_CLIENT_SECRET
         authorized_user_info["refresh_token"] = authorization_response["refresh_token"]
 
+        auth_method_value = (
+            GoogleOAuthAuthenticationMethod.OAUTH_USER_INTERACTIVE.value
+            if is_user_mode
+            else GoogleOAuthAuthenticationMethod.OAUTH_INTERACTIVE.value
+        )
+
         token_json_str = json.dumps(authorized_user_info)
         oauth_creds = get_google_oauth_creds(
-            token_json_str=token_json_str, source=DocumentSource.GOOGLE_DRIVE
+            token_json_str=token_json_str,
+            source=DocumentSource.GOOGLE_DRIVE,
+            authentication_method=auth_method_value,
         )
         if not oauth_creds:
             raise RuntimeError("get_google_oauth_creds returned None.")
@@ -196,15 +230,13 @@ def handle_google_drive_oauth_callback(
         credential_dict: dict[str, str] = {}
         credential_dict[DB_CREDENTIALS_DICT_TOKEN_KEY] = oauth_creds_sanitized_json_str
         credential_dict[DB_CREDENTIALS_PRIMARY_ADMIN_KEY] = session.email
-        credential_dict[DB_CREDENTIALS_AUTHENTICATION_METHOD] = (
-            GoogleOAuthAuthenticationMethod.OAUTH_INTERACTIVE.value
-        )
+        credential_dict[DB_CREDENTIALS_AUTHENTICATION_METHOD] = auth_method_value
 
         credential_info = CredentialBase(
             credential_json=credential_dict,
             admin_public=True,
             source=DocumentSource.GOOGLE_DRIVE,
-            name="OAuth (interactive)",
+            name="OAuth (single user)" if is_user_mode else "OAuth (interactive)",
         )
 
         create_credential(credential_info, user, db_session)
@@ -228,3 +260,5 @@ def handle_google_drive_oauth_callback(
             "redirect_on_success": session.redirect_on_success,
         }
     )
+
+

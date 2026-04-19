@@ -17,6 +17,12 @@ from onyx.connectors.google_utils.google_utils import execute_paginated_retrieva
 from onyx.connectors.google_utils.resources import AdminService
 from onyx.connectors.google_utils.resources import get_admin_service
 from onyx.connectors.google_utils.resources import get_drive_service
+from onyx.connectors.google_utils.shared_constants import (
+    DB_CREDENTIALS_AUTHENTICATION_METHOD,
+)
+from onyx.connectors.google_utils.shared_constants import (
+    GoogleOAuthAuthenticationMethod,
+)
 from onyx.db.models import ConnectorCredentialPair
 from onyx.utils.logger import setup_logger
 
@@ -393,6 +399,21 @@ def gdrive_group_sync(
         if cc_pair.credential.credential_json
         else {}
     )
+
+    # Single-user OAuth lacks admin.directory.* scopes, so group sync — which
+    # requires workspace-admin calls (groups.list, drives.list, etc.) — cannot
+    # run. Skip with a warning rather than 403-ing mid-sync.
+    if (
+        credential_json.get(DB_CREDENTIALS_AUTHENTICATION_METHOD)
+        == GoogleOAuthAuthenticationMethod.OAUTH_USER_INTERACTIVE.value
+    ):
+        logger.warning(
+            "Skipping Google Drive group sync: credential uses single-user OAuth "
+            "which lacks admin.directory.* scopes. External groups will not be "
+            "populated for this connector."
+        )
+        return
+
     google_drive_connector.load_credentials(credential_json)
     admin_service = get_admin_service(
         google_drive_connector.creds, google_drive_connector.primary_admin_email
